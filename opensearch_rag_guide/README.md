@@ -194,7 +194,7 @@ graph TD
     Lambda -->|3. 벡터 검색| OpenSearch[Amazon OpenSearch<br/>Vector DB]
     OpenSearch -->|4. 관련 문서 반환| Lambda
     Lambda -->|5. 프롬프트| Bedrock_LLM[Amazon Bedrock<br/>LLM Claude]
-    Bedrock_LLM -->|6. 최종 답변| Lambda
+    Bedrock_LLM -->|최종 답변| Lambda
     Lambda --> User
     
     S3[Amazon S3<br/>원본 문서] -->|문서 업로드<br/>S3 Event| Lambda_Indexing[Lambda<br/>인덱싱 함수]
