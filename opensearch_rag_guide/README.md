@@ -2153,14 +2153,12 @@ bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
 - 개발/테스트 환경
 - 트래픽 변동이 큰 경우
 - 관리 부담 최소화
-- < 30TB 데이터
 
 **Domain (Cluster) 추천:**
 - 프로덕션 환경
 - 예측 가능한 트래픽
 - 세밀한 성능 튜닝 필요
 - 커스텀 플러그인 사용
-- > 30TB 데이터
 
 ### Q9. 비용을 절감하려면?
 **A:** 비용 최적화 전략:
