@@ -112,8 +112,8 @@ File Search는 다양한 문서 및 코드 형식을 지원합니다.
 graph TD
     User[사용자 질문] --> App[애플리케이션]
     App -->|1. 문서 업로드| Store[Google File Search Store]
-    Store -->|2. 자동 처리| Index[인덱싱 (파싱/청킹/임베딩)]
-    App -->|3. 질문 + 도구 설정| Gemini[Gemini 1.5 Flash/Pro]
+    Store -->|2. 자동 처리| Index[인덱싱<br/>파싱/청킹/임베딩]
+    App -->|3. 질문 + 도구 설정| Gemini[Gemini Models]
     Gemini -->|4. 검색 쿼리| Store
     Store -->|5. 관련 컨텍스트 반환| Gemini
     Gemini -->|6. 최종 답변 생성| App
