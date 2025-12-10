@@ -177,7 +177,7 @@ graph TD
     Client -->|API 요청| EdgeFunc[Supabase Edge Function<br/>RAG Handler]
 
     EdgeFunc -->|1. 질문 임베딩| Embedding[OpenAI/Ollama<br/>Embedding API]
-    Embedding -->|벡터 생성| EdgeFunc
+    Embedding -->|벡터 반환| EdgeFunc
 
     EdgeFunc -->|2. 벡터 검색| Supabase[(Supabase PostgreSQL<br/>pgvector + RLS)]
     Supabase -->|3. 관련 문서 반환| EdgeFunc
@@ -188,9 +188,9 @@ graph TD
     EdgeFunc -->|응답| Client
     Client --> User
 
-    S3[문서 저장소<br/>Supabase Storage] -->|문서 업로드| Indexing[Edge Function<br/>인덱싱]
-    Indexing -->|청크 분할| Embedding
-    Embedding -->|벡터 저장| Supabase
+    S3[문서 저장소<br/>Supabase Storage] -->|문서 업로드| Indexing[Edge Function<br/>문서 처리]
+    Indexing -->|텍스트 분할| Embedding
+    Embedding -->|임베딩 저장| Supabase
 ```
 
 ### 워크플로우 상세 설명
@@ -2116,4 +2116,3 @@ query_embedding = ollama.embeddings(
 - **[Supabase Discord](https://discord.supabase.com/)**: 공식 Discord 커뮤니티
 - **[GitHub Discussions](https://github.com/supabase/supabase/discussions)**: GitHub 토론
 - **[Stack Overflow - supabase](https://stackoverflow.com/questions/tagged/supabase)**: Q&A
-
