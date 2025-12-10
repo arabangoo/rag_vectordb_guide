@@ -162,7 +162,7 @@ graph TD
     Atlas -->|문서 반환| App
 
     App -->|프롬프트| LLM[OpenAI GPT-4o<br/>or Claude]
-    LLM -->|최종 답변| App
+    LLM -->|답변| App
 
     App --> User
 ```
