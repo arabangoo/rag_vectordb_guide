@@ -171,11 +171,11 @@ graph TD
 
 ```mermaid
 graph LR
-    Doc[원본 문서] -->|1. 업로드| Storage[파일 저장소]
-    Storage -->|2. 파싱| Parser[문서 파서<br/>PDF/DOCX/etc]
-    Parser -->|3. 청킹| Chunker[텍스트 분할<br/>1000-1500자]
-    Chunker -->|4. 임베딩| Embed[임베딩 생성<br/>OpenAI API]
-    Embed -->|5. 저장| MongoDB[(MongoDB Atlas<br/>documents 컬렉션)]
+    Doc[원본 문서] -->|업로드| Storage[파일 저장소]
+    Storage -->|파싱| Parser[문서 파서<br/>PDF/DOCX/etc]
+    Parser -->|청킹| Chunker[텍스트 분할<br/>1000-1500자]
+    Chunker -->|임베딩| Embed[임베딩 생성<br/>OpenAI API]
+    Embed -->|저장| MongoDB[(MongoDB Atlas<br/>documents 컬렉션)]
 ```
 
 ### 아키텍처 상세 (프로덕션)
