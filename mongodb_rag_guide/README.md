@@ -205,6 +205,7 @@ ML 서비스 계층
 ├─ OpenAI API
 │  ├─ text-embedding-3-small (임베딩)
 │  └─ gpt-4o-mini (답변 생성)
+└─ AWS Bedrock (대안)
 ```
 
 ### 핵심 컴포넌트
