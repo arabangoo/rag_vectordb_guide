@@ -187,10 +187,6 @@ graph TD
 
     EdgeFunc -->|응답| Client
     Client --> User
-
-    S3[문서 저장소<br/>Supabase Storage] -->|문서 업로드| Indexing[Edge Function<br/>문서 처리]
-    Indexing -->|텍스트 분할| Embedding
-    Embedding -->|임베딩 저장| Supabase
 ```
 
 ### 워크플로우 상세 설명
