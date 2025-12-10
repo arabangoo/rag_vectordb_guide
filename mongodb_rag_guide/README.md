@@ -180,11 +180,13 @@ graph LR
 
 ### 아키텍처 상세 (프로덕션)
 
-```mermaid
-graph LR
-    Client[클라이언트<br/>Web/Mobile] --> FastAPI[FastAPI Server<br/>+ Redis Cache]
-    FastAPI --> MongoDB[(MongoDB Atlas<br/>Vector Search + Change Streams)]
-    FastAPI --> OpenAI[OpenAI API<br/>Embeddings + LLM]
+```
+클라이언트 (Web/Mobile)
+    ↓
+FastAPI Server + Redis Cache
+    ↓
+    ├─→ MongoDB Atlas (Vector Search + Change Streams)
+    └─→ OpenAI API (Embeddings + LLM)
 ```
 
 ### 핵심 컴포넌트
