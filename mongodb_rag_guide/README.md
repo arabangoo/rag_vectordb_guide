@@ -181,12 +181,30 @@ graph LR
 ### 아키텍처 상세 (프로덕션)
 
 ```
-클라이언트 (Web/Mobile)
+클라이언트 계층
+├─ 웹 애플리케이션 (React/Vue/Next.js)
+└─ 모바일 앱 (iOS/Android)
     ↓
-FastAPI Server + Redis Cache
+API 계층
+├─ FastAPI/Express Server
+│  ├─ 인증/인가 (JWT)
+│  ├─ Rate Limiting
+│  └─ Request Validation
+└─ Redis Cache
+   ├─ 임베딩 캐시 (쿼리 재사용)
+   └─ 세션 관리
     ↓
-    ├─→ MongoDB Atlas (Vector Search + Change Streams)
-    └─→ OpenAI API (Embeddings + LLM)
+데이터베이스 계층
+├─ MongoDB Atlas (Seoul Region)
+│  ├─ Vector Search Index (HNSW)
+│  ├─ Change Streams (실시간 동기화)
+│  ├─ documents 컬렉션
+│  └─ Row Level Security
+    ↓
+ML 서비스 계층
+├─ OpenAI API
+│  ├─ text-embedding-3-small (임베딩)
+│  └─ gpt-4o-mini (답변 생성)
 ```
 
 ### 핵심 컴포넌트
