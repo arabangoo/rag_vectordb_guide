@@ -183,7 +183,7 @@ graph TD
     Supabase -->|3. 문서 반환| EdgeFunc
 
     EdgeFunc -->|4. 프롬프트| LLM[OpenAI GPT-4o<br/>or Ollama]
-    LLM -->|5. 최종 답변| EdgeFunc
+    LLM -->|최종 답변| EdgeFunc
 
     EdgeFunc -->|응답| Client
     Client --> User
