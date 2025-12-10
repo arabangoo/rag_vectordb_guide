@@ -181,36 +181,10 @@ graph LR
 ### 아키텍처 상세 (프로덕션)
 
 ```mermaid
-graph TB
-    subgraph Client["클라이언트"]
-        Web[웹 앱]
-        Mobile[모바일 앱]
-    end
-
-    subgraph API["API Layer"]
-        FastAPI[FastAPI Server<br/>Python/Node.js]
-        Cache[Redis Cache<br/>임베딩 캐시]
-    end
-
-    subgraph MongoDB["MongoDB Atlas"]
-        Cluster[M10 Cluster<br/>Seoul Region]
-        VectorIndex[Vector Search Index<br/>HNSW Algorithm]
-        ChangeStreams[Change Streams<br/>실시간 동기화]
-    end
-
-    subgraph ML["ML Services"]
-        OpenAI_Embed[OpenAI<br/>text-embedding-3-small]
-        OpenAI_LLM[OpenAI<br/>GPT-4o-mini]
-    end
-
-    Web --> FastAPI
-    Mobile --> FastAPI
-    FastAPI --> Cache
-    FastAPI --> Cluster
-    Cluster --> VectorIndex
-    Cluster --> ChangeStreams
-    FastAPI --> OpenAI_Embed
-    FastAPI --> OpenAI_LLM
+graph LR
+    Client[클라이언트<br/>Web/Mobile] --> FastAPI[FastAPI Server<br/>+ Redis Cache]
+    FastAPI --> MongoDB[(MongoDB Atlas<br/>Vector Search + Change Streams)]
+    FastAPI --> OpenAI[OpenAI API<br/>Embeddings + LLM]
 ```
 
 ### 핵심 컴포넌트
@@ -1977,4 +1951,3 @@ def search_with_metrics(query):
 - **[Vector Search Pricing](https://www.mongodb.com/pricing)**: 최신 가격 정보
 - **[MongoDB Atlas Free Tier](https://www.mongodb.com/cloud/atlas/register)**: 무료 계정 시작
 - **[OpenAI Embeddings Guide](https://platform.openai.com/docs/guides/embeddings)**: 임베딩 모델 가이드
-
