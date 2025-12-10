@@ -155,14 +155,14 @@ MongoDB Atlas Vector Search 기반 RAG는 다음과 같은 시나리오에서 �
 graph TD
     User[사용자 질문] --> App[애플리케이션]
 
-    App -->|1. 질문 임베딩| OpenAI[OpenAI/Bedrock<br/>Embedding API]
+    App -->|임베딩| OpenAI[OpenAI/Bedrock<br/>Embedding API]
     OpenAI -->|벡터 반환| App
 
-    App -->|2. 벡터 검색| Atlas[(MongoDB Atlas<br/>Vector Search<br/>HNSW Index)]
-    Atlas -->|3. 관련 문서 반환| App
+    App -->|벡터 검색| Atlas[(MongoDB Atlas<br/>Vector Search<br/>HNSW Index)]
+    Atlas -->|문서 반환| App
 
-    App -->|4. 프롬프트 구성| LLM[OpenAI GPT-4o<br/>or Claude]
-    LLM -->|5. 최종 답변| App
+    App -->|프롬프트| LLM[OpenAI GPT-4o<br/>or Claude]
+    LLM -->|최종 답변| App
 
     App --> User
 ```
