@@ -176,13 +176,13 @@ graph TD
     User[사용자 질문] --> Client[Client App<br/>Web/Mobile]
     Client -->|API 요청| EdgeFunc[Supabase Edge Function<br/>RAG Handler]
 
-    EdgeFunc -->|1. 임베딩| Embedding[OpenAI/Ollama<br/>Embedding API]
+    EdgeFunc -->|임베딩| Embedding[OpenAI/Ollama<br/>Embedding API]
     Embedding -->|벡터 반환| EdgeFunc
 
-    EdgeFunc -->|2. 벡터 검색| Supabase[(Supabase PostgreSQL<br/>pgvector + RLS)]
-    Supabase -->|3. 문서 반환| EdgeFunc
+    EdgeFunc -->|벡터 검색| Supabase[(Supabase PostgreSQL<br/>pgvector + RLS)]
+    Supabase -->|문서 반환| EdgeFunc
 
-    EdgeFunc -->|4. 프롬프트| LLM[OpenAI GPT-4o<br/>or Ollama]
+    EdgeFunc -->|프롬프트| LLM[OpenAI GPT-4o<br/>or Ollama]
     LLM -->|최종 답변| EdgeFunc
 
     EdgeFunc -->|응답| Client
