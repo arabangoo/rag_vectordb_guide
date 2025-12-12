@@ -20,6 +20,6 @@ https://supabase.com/docs
 https://supabase.com/docs/guides/ai 
 <br/><br/>
 ### [MongoDB Atlas Vector Search 공식 문서]
-https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-overview/
+https://www.mongodb.com/docs/atlas/atlas-vector-search
 
 
