@@ -522,7 +522,6 @@ class RAGEngine:
 ### 추가 학습 자료
 
 -   **[Gemini API Cookbook](https://github.com/google-gemini/cookbook)**: 실전 예제 코드 모음
--   **[RAG 디자인 패턴](https://ai.google.dev/gemini-api/docs/retrieval)**: Google의 RAG 구현 권장 사항
 -   **[API 가격 정책](https://ai.google.dev/pricing)**: 최신 가격 정보 및 할당량 확인
 -   **[Vertex AI 통합](https://cloud.google.com/vertex-ai/generative-ai/docs/embeddings/get-text-embeddings)**: 엔터프라이즈급 배포를 위한 GCP 통합 가이드
 
