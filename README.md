@@ -10,14 +10,16 @@ https://www.postgresql.org/
 ### [Google File Search 공식 가이드]
 https://ai.google.dev/gemini-api/docs/file-search
 <br/><br/>
-### [Generative AI Handbook]
-https://genai-handbook.github.io/ 
+### [오픈소스 OpenSearch 문서]
+https://opensearch.org/docs/latest/ 
 <br/><br/>
-### [AI Engineer Roadmap]
-https://roadmap.sh/ai-engineer 
+### [Supabase 공식 가이드]
+https://supabase.com/docs
 <br/><br/>
-### [Generative AI Handbook]
-https://genai-handbook.github.io/  
+### [Supabase AI & Vector 가이드]
+https://supabase.com/docs/guides/ai 
 <br/><br/>
+### [MongoDB Atlas Vector Search 공식 문서]
+https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-overview/
 
 
