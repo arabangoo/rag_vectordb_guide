@@ -1958,7 +1958,6 @@ def search_with_metrics(query):
 
 ### GitHub 저장소
 
-- **[mongodb-labs/pymongo-ai](https://github.com/mongodb-labs/pymongo-ai)**: MongoDB AI 통합 도구
 - **[MongoDB Developer Hub](https://github.com/mongodb-developer)**: 공식 샘플 코드 및 튜토리얼
 
 ### 커뮤니티
