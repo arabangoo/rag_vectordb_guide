@@ -269,7 +269,7 @@ graph TD
     VectorStore -->|문서| RAGChain
 
     RAGChain -->|프롬프트 구성| PromptTemplate[Prompt Template<br/>Context + Question]
-    PromptTemplate -->|프롬프트| RAGChain
+    PromptTemplate -->|완성| RAGChain
 
     RAGChain -->|LLM| LLM[LLM<br/>GPT-4o/Claude/Gemini]
     LLM -->|답변| RAGChain
