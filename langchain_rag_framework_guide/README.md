@@ -262,16 +262,16 @@ graph TD
 
     App -->|LCEL Chain| RAGChain{RAG Chain}
 
-    RAGChain -->|1. 임베딩| Embeddings[Embeddings<br/>OpenAI/Cohere/Ollama]
-    Embeddings -->|쿼리 벡터| RAGChain
+    RAGChain -->|임베딩| Embeddings[Embeddings<br/>OpenAI/Cohere/Ollama]
+    Embeddings -->|쿼리| RAGChain
 
-    RAGChain -->|2. 검색| VectorStore[(Vector Store<br/>Pinecone/Chroma/FAISS)]
-    VectorStore -->|관련 문서| RAGChain
+    RAGChain -->|검색| VectorStore[(Vector Store<br/>Pinecone/Chroma/FAISS)]
+    VectorStore -->|문서| RAGChain
 
-    RAGChain -->|3. 프롬프트 구성| PromptTemplate[Prompt Template<br/>Context + Question]
-    PromptTemplate -->|최종 프롬프트| RAGChain
+    RAGChain -->|프롬프트 구성| PromptTemplate[Prompt Template<br/>Context + Question]
+    PromptTemplate -->|프롬프트| RAGChain
 
-    RAGChain -->|4. LLM 호출| LLM[LLM<br/>GPT-4o/Claude/Gemini]
+    RAGChain -->|LLM| LLM[LLM<br/>GPT-4o/Claude/Gemini]
     LLM -->|답변| RAGChain
 
     RAGChain -->|결과| App
