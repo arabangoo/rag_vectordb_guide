@@ -2033,10 +2033,6 @@ LangGraph의 시각화 및 디버깅 도구. 그래프 구조를 시각적으로
 - [LangGraph GitHub](https://github.com/langchain-ai/langgraph)
 - [LangChain 문서](https://python.langchain.com/)
 
-### 튜토리얼
-- [LangGraph Quickstart](https://langchain-ai.github.io/langgraph/tutorials/introduction/)
-- [RAG Tutorials](https://langchain-ai.github.io/langgraph/tutorials/#rag)
-
 ---
 
 **🎉 이제 LangGraph로 고급 RAG 시스템을 구축할 준비가 되었습니다!**
