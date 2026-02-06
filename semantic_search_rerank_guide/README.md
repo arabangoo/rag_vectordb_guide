@@ -1645,7 +1645,6 @@ trainer.train()
 ### 모델 허브
 
 - [Hugging Face - Cross-Encoders](https://huggingface.co/cross-encoder)
-- [Hugging Face - BGE Rerankers](https://huggingface.co/BAAI)
 - [ColBERTv2](https://huggingface.co/colbert-ir/colbertv2.0)
 
 ### 튜토리얼 및 블로그
@@ -1665,4 +1664,5 @@ trainer.train()
 
 - [MTEB Leaderboard (임베딩 모델)](https://huggingface.co/spaces/mteb/leaderboard)
 - [BEIR Benchmark (검색 모델)](https://github.com/beir-cellar/beir)
+
 
