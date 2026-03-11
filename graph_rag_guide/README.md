@@ -1362,7 +1362,6 @@ CREATE INDEX ON kg_chunk_entity (entity_id, chunk_id);
 
 ### 관련 가이드
 
-- [arabangoo.com](https://arabangoo.com/)
 - [PostgreSQL 공식 웹사이트](https://www.postgresql.org/)
 - [Supabase AI & Vector 가이드](https://supabase.com/docs/guides/ai)
 - [MongoDB Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search)
