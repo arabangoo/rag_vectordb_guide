@@ -1,0 +1,1368 @@
+# Knowledge Graph & Graph RAG 완전 가이드
+
+> 개념부터 PostgreSQL 실전 구현까지 — 한국어 개발자를 위한 상세 가이드
+
+[![Python](https://img.shields.io/badge/Python-3.10+-yellow.svg)](https://www.python.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-blue.svg)](https://www.postgresql.org/)
+[![pgvector](https://img.shields.io/badge/pgvector-0.7+-green.svg)](https://github.com/pgvector/pgvector)
+[![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
+
+## 📋 목차
+
+- [RAG란 무엇인가](#-rag란-무엇인가)
+- [Standard RAG의 한계](#-standard-rag의-한계)
+- [Knowledge Graph란](#-knowledge-graph란)
+- [Graph RAG란](#-graph-rag란)
+- [Knowledge Graph vs Graph RAG](#-knowledge-graph-vs-graph-rag)
+- [Knowledge Graph 핵심 구성 요소](#-knowledge-graph-핵심-구성-요소)
+- [Graph RAG 구현 방식 비교](#-graph-rag-구현-방식-비교)
+- [Microsoft GraphRAG 상세](#-microsoft-graphrag-상세)
+- [LightRAG 상세](#-lightrag-상세)
+- [PostgreSQL로 Knowledge Graph 구현하기](#-postgresql로-knowledge-graph-구현하기)
+- [Python 통합 구현](#-python-통합-구현)
+- [언제 무엇을 선택할까](#-언제-무엇을-선택할까)
+- [PDF 파서 선택 가이드](#-pdf-파서-선택-가이드)
+- [트러블슈팅](#-트러블슈팅)
+- [참고 자료](#-참고-자료)
+
+---
+
+## 🎯 RAG란 무엇인가
+
+**RAG(Retrieval-Augmented Generation)** 는 LLM(대형 언어 모델)이 답변을 생성할 때, 외부 지식 베이스에서 관련 정보를 **검색(Retrieve)** 하여 함께 활용하는 기법입니다.
+
+```
+[사용자 질문]
+      ↓
+[검색 엔진] → 지식 베이스에서 관련 문서 검색
+      ↓
+[LLM] → 검색된 문서 + 질문을 함께 받아 답변 생성
+      ↓
+[답변]
+```
+
+### RAG가 필요한 이유
+
+LLM은 학습 데이터에 없는 최신 정보나 특정 도메인 지식(사내 문서, 전문 규정, 제품 매뉴얼 등)에 대해 정확한 답변을 하기 어렵습니다. RAG는 이 문제를 해결합니다.
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **LLM 단독** | 빠르고 간단 | 학습 데이터 외 정보 모름, 할루시네이션 발생 |
+| **Fine-tuning** | 도메인 특화 | 비용 높음, 재학습 필요, 지식 업데이트 어려움 |
+| **RAG** | 실시간 지식 반영, 출처 추적 가능 | 검색 품질에 의존 |
+
+### Standard RAG 동작 방식
+
+```
+[인덱싱 단계]
+문서 → 청킹(Chunking) → 임베딩(Embedding) → 벡터 DB 저장
+
+[검색 단계]
+질문 → 임베딩 → 벡터 유사도 검색 → top-k 청크 반환 → LLM 입력
+```
+
+---
+
+## ⚠️ Standard RAG의 한계
+
+Standard RAG는 강력하지만, 문서 내 **관계(Relationship)** 를 파악하지 못하는 근본적인 한계가 있습니다.
+
+### 한계 1: 독립적 청크 검색
+
+```
+문서 구조:
+  [용어 정의 섹션] ──정의──► [핵심 개념 A]
+  [핵심 개념 A]   ──조건──► [예외 규정 섹션]
+  [예외 규정 섹션] ──참조──► [별첨 표 1]
+
+질문: "핵심 개념 A의 예외는 무엇인가요?"
+
+Standard RAG:
+  → "핵심 개념 A" 관련 청크 검색
+  → ❌ "예외 규정 섹션"이 별도 청크로 분리되어 있어 누락 가능
+  → ❌ "별첨 표 1"은 아예 포함 안 됨
+```
+
+### 한계 2: 다단계 추론 불가
+
+```
+질문: "A 기능을 사용하려면 어떤 사전 조건이 필요한가요?"
+
+실제 문서 관계:
+  A 기능 → 의존 → B 모듈 → 의존 → C 라이브러리 → 요구 → 특정 OS 버전
+
+Standard RAG:
+  → "A 기능" 청크만 검색
+  → ❌ B → C → OS 버전으로 이어지는 체인 탐색 불가
+```
+
+### 한계 3: 전체 맥락 파악 어려움
+
+```
+질문: "이 시스템의 전반적인 아키텍처를 설명해줘"
+
+Standard RAG:
+  → 특정 청크 몇 개만 반환
+  → ❌ 시스템 전체 구조(컴포넌트 간 관계)를 조합해서 설명하지 못함
+```
+
+### 언제 Standard RAG로 충분한가
+
+- FAQ, 블로그, 뉴스 등 독립적인 콘텐츠
+- 단순 키워드 검색이 목적인 경우
+- 문서 간 상호 참조가 거의 없는 경우
+- 빠른 응답 속도가 최우선인 경우
+
+---
+
+## 🧠 Knowledge Graph란
+
+**Knowledge Graph(지식 그래프)** 는 현실 세계의 개념, 개체(Entity), 사건을 **노드(Node)** 로, 그것들 사이의 관계를 **엣지(Edge)** 로 표현한 구조화된 지식 표현 방식입니다.
+
+### 직관적 이해
+
+일반적인 텍스트와 Knowledge Graph의 차이:
+
+```
+[텍스트]
+"Python은 Guido van Rossum이 만든 프로그래밍 언어이며,
+ Django는 Python 기반의 웹 프레임워크다."
+
+[Knowledge Graph]
+Python ──[만든사람]──► Guido van Rossum
+Python ──[분류]──────► 프로그래밍 언어
+Django ──[기반언어]──► Python
+Django ──[분류]──────► 웹 프레임워크
+```
+
+텍스트는 순차적으로 읽어야 의미를 파악하지만, Knowledge Graph는 어떤 노드에서 시작하든 관계를 따라 탐색할 수 있습니다.
+
+### 실제 활용 예시
+
+**기술 문서 Knowledge Graph**:
+```
+[API 엔드포인트: /users/{id}]
+      │
+      ├─[요청방법]──► GET, PUT, DELETE
+      ├─[인증필요]──► OAuth 2.0 토큰
+      ├─[응답형식]──► UserResponse 스키마
+      │                    │
+      │                    └─[포함필드]──► id, name, email, createdAt
+      └─[에러코드]──► 404 (Not Found), 403 (Forbidden)
+```
+
+**전자상거래 Knowledge Graph**:
+```
+[스마트폰 A]
+      │
+      ├─[브랜드]────► 제조사 X
+      ├─[호환악세]──► 케이스 B, 충전기 C, 이어폰 D
+      ├─[경쟁상품]──► 스마트폰 E, 스마트폰 F
+      └─[카테고리]──► 모바일 > 스마트폰 > 플래그십
+```
+
+### Google Knowledge Graph
+
+Google이 검색에서 사용하는 Knowledge Graph가 대표적인 예입니다.
+"아인슈타인"을 검색하면 단순 텍스트 결과가 아니라 출생일, 국적, 업적, 관련 인물 등 구조화된 정보가 함께 표시되는 것이 Knowledge Graph의 활용입니다.
+
+---
+
+## 🔗 Graph RAG란
+
+**Graph RAG** 는 RAG 시스템에 Knowledge Graph를 결합하여 검색 능력을 확장한 기법입니다.
+
+Standard RAG가 "벡터 유사도로 관련 청크 검색"에 그친다면, Graph RAG는 Knowledge Graph의 **관계 정보를 활용해 연결된 컨텍스트를 함께 가져옵니다.**
+
+### Graph RAG 동작 방식
+
+```
+[인덱싱 단계]
+문서
+  ↓ 파싱/청킹
+텍스트 청크
+  ↓ LLM 또는 규칙 기반
+엔티티(개념) 추출 + 관계 추출
+  ↓
+Knowledge Graph 구축 (노드 + 엣지)
+  ↓
+벡터 임베딩 + 그래프 저장
+
+[검색 단계]
+질문
+  ↓
+① 벡터 검색 → 관련 청크 top-k
+  ↓
+② 해당 청크의 엔티티 확인
+  ↓
+③ Knowledge Graph 탐색 → 연관 엔티티 및 청크 확장
+  ↓
+④ 원래 top-k + 그래프 확장 컨텍스트 → LLM
+  ↓
+답변 (관계 정보까지 반영된 풍부한 답변)
+```
+
+### Standard RAG vs Graph RAG 비교
+
+| 구분 | Standard RAG | Graph RAG |
+|------|-------------|-----------|
+| **검색 방식** | 벡터 유사도 | 벡터 유사도 + 그래프 탐색 |
+| **컨텍스트 범위** | 유사한 청크들 | 유사한 청크 + 관계로 연결된 청크들 |
+| **다단계 추론** | ❌ 불가 | ✅ 그래프 체인 탐색 |
+| **전체 구조 파악** | ❌ 어려움 | ✅ 커뮤니티 요약 활용 |
+| **구현 복잡도** | 낮음 | 중간~높음 |
+| **인제스트 비용** | 낮음 | 높음 (관계 추출 필요) |
+| **검색 속도** | 빠름 | 상대적으로 느림 |
+| **적합한 문서** | 독립적 콘텐츠 | 상호 참조가 많은 문서 |
+
+---
+
+## 🔍 Knowledge Graph vs Graph RAG
+
+> 두 개념을 혼동하기 쉽습니다. 명확히 구분하세요.
+
+**Knowledge Graph**는 지식을 표현하는 **데이터 구조/모델**입니다.
+**Graph RAG**는 Knowledge Graph를 검색에 활용하는 **기법/시스템**입니다.
+
+```
+Knowledge Graph          Graph RAG
+─────────────────        ──────────────────────────────
+데이터 구조               검색 + 생성 시스템
+
+노드: 엔티티, 개념        Knowledge Graph를 구축하고
+엣지: 관계, 속성          벡터 검색과 결합하여
+                          LLM이 더 좋은 답변을 생성하도록
+                          하는 전체 파이프라인
+```
+
+**비유**:
+- Knowledge Graph = 도서관의 **색인 카드 시스템** (모든 책의 관계 정보)
+- Graph RAG = 색인 카드를 활용해서 **필요한 정보를 찾아주는 사서**
+
+---
+
+## 🏗 Knowledge Graph 핵심 구성 요소
+
+### 1. 엔티티(Entity) — 노드
+
+Knowledge Graph의 노드. 실세계의 개념, 개체, 사건을 나타냅니다.
+
+```
+엔티티 유형 예시:
+  Person    : 인물 (개발자, 저자, 관련 인물)
+  Product   : 제품, 서비스
+  Concept   : 추상적 개념 (알고리즘, 패턴, 원칙)
+  Event     : 사건, 버전 릴리즈
+  Location  : 장소, 조직
+  Document  : 문서, 섹션, 조항
+```
+
+### 2. 관계(Relation) — 엣지
+
+노드 간의 연결. 방향성이 있으며 의미를 가집니다.
+
+```
+관계 유형 예시:
+  IS_A          : 상위 개념 관계    (Python IS_A 프로그래밍언어)
+  PART_OF       : 구성 요소 관계    (엔진 PART_OF 자동차)
+  DEPENDS_ON    : 의존 관계         (Django DEPENDS_ON Python)
+  CREATED_BY    : 생성자 관계       (Python CREATED_BY Guido)
+  REFERS_TO     : 참조 관계         (섹션3 REFERS_TO 섹션7)
+  CONTRADICTS   : 상충 관계         (정책A CONTRADICTS 정책B)
+  REQUIRES      : 선행 조건 관계    (배포 REQUIRES 테스트통과)
+  RELATED_TO    : 일반 연관 관계    (기능A RELATED_TO 기능B)
+```
+
+### 3. 트리플(Triple)
+
+Knowledge Graph의 기본 단위. `(주어, 관계, 목적어)` 형태:
+
+```
+(Python, CREATED_BY, Guido van Rossum)
+(Django, DEPENDS_ON, Python)
+(Django, IS_A, 웹프레임워크)
+(웹프레임워크, IS_A, 소프트웨어)
+```
+
+### 4. 커뮤니티(Community)
+
+밀접하게 연결된 노드들의 그룹. Microsoft GraphRAG에서 핵심 개념입니다.
+
+```
+[커뮤니티 예시: Python 생태계]
+  Python, Django, Flask, FastAPI, Pip, PyPI, Guido van Rossum
+  → 이 그룹 전체를 요약한 "커뮤니티 요약" 생성
+  → 전체 데이터셋에 대한 광범위한 질문 답변에 활용
+```
+
+### 5. 그래프 탐색 깊이 (Hop)
+
+```
+1-hop: 직접 연결된 노드만 탐색
+  Django → (DEPENDS_ON) → Python
+
+2-hop: 2단계 연결까지 탐색
+  Django → Python → (CREATED_BY) → Guido van Rossum
+
+n-hop: n단계 연결까지 탐색 (비용 증가, 노이즈 증가 주의)
+```
+
+---
+
+## 🛠 Graph RAG 구현 방식 비교
+
+### 주요 라이브러리/도구
+
+| 구현 방식 | 도구 | 그래프 저장소 | 특징 | 난이도 |
+|-----------|------|--------------|------|--------|
+| **Microsoft GraphRAG** | Python 패키지 | Azure AI Search / 파일 | LLM 기반 자동 추출, 커뮤니티 탐색 | ⭐⭐⭐ |
+| **LightRAG** | Python 패키지 | Neo4j / PostgreSQL / 파일 | 경량, 듀얼 레벨 검색 | ⭐⭐⭐ |
+| **Neo4j + LangChain** | 전용 그래프 DB | Neo4j | Cypher 쿼리, 강력한 시각화 | ⭐⭐⭐⭐ |
+| **Apache AGE** | PostgreSQL 확장 | PostgreSQL | Cypher를 PostgreSQL에서 사용 | ⭐⭐⭐⭐ |
+| **PostgreSQL 직접 구현** | pgvector + CTE | PostgreSQL | 추가 인프라 불필요, SQL로 제어 | ⭐⭐ |
+
+### 선택 기준
+
+```
+추가 인프라를 설치하기 어렵다
+  → PostgreSQL 직접 구현
+
+빠른 프로토타이핑이 필요하다
+  → LightRAG (pip install lightrag-hku)
+
+대규모 문서, 전체 요약 질의가 많다
+  → Microsoft GraphRAG
+
+강력한 그래프 쿼리/시각화가 필요하다
+  → Neo4j + LangChain
+
+PostgreSQL에서 Cypher 문법을 쓰고 싶다
+  → Apache AGE
+```
+
+---
+
+## 🔬 Microsoft GraphRAG 상세
+
+Microsoft에서 오픈소스로 공개한 Graph RAG 프레임워크입니다.
+[GitHub: microsoft/graphrag](https://github.com/microsoft/graphrag)
+
+### 핵심 아이디어
+
+일반 RAG가 개별 청크를 검색하는 것과 달리, GraphRAG는:
+1. 문서에서 **엔티티와 관계를 자동 추출** (LLM 활용)
+2. 추출된 그래프를 **커뮤니티로 클러스터링**
+3. 각 커뮤니티의 **요약(Summary)을 사전 생성**
+4. 질의 유형에 따라 **Global / Local / Hybrid 검색** 수행
+
+### 인덱싱 파이프라인
+
+```
+[1단계] 문서 분할
+  문서 → TextUnit (기본 2400 토큰 단위로 분할)
+
+[2단계] 엔티티·관계 추출 (LLM 호출)
+  각 TextUnit → LLM → 엔티티 목록 + 관계 목록 추출
+  예: "Python은 Guido가 만들었다"
+       → 엔티티: [Python, Guido van Rossum]
+       → 관계: (Python) -[CREATED_BY]→ (Guido van Rossum)
+
+[3단계] 그래프 구축
+  모든 TextUnit에서 추출된 엔티티·관계를 통합
+  동일 엔티티는 병합 (예: "Python"과 "파이썬"이 같은 노드)
+
+[4단계] 커뮤니티 탐지
+  Leiden 알고리즘으로 밀접한 노드 그룹 식별
+
+[5단계] 커뮤니티 요약 생성 (LLM 호출)
+  각 커뮤니티 → LLM → 커뮤니티 요약 텍스트 생성
+  요약도 임베딩하여 저장
+```
+
+### 검색 모드
+
+```
+Global Search (전체 탐색)
+  ├─ 언제: "이 문서 전체에서 가장 중요한 주제는?"
+  ├─ 방법: 커뮤니티 요약들을 순위화 → 상위 요약 LLM에 전달
+  └─ 특징: 전체적인 질문에 강함, 비용 높음
+
+Local Search (로컬 탐색)
+  ├─ 언제: "특정 기능 X는 어떻게 동작하나?"
+  ├─ 방법: 관련 엔티티 찾기 → 이웃 엔티티 + 관계 + 청크 포함
+  └─ 특징: 특정 개념에 대한 질문에 강함
+
+DRIFT Search (Dynamic Reasoning and Inference with Flexible Traversal)
+  ├─ 언제: 복합적인 추론이 필요한 질문
+  ├─ 방법: Local + 커뮤니티 컨텍스트 결합
+  └─ 특징: 정확도 높음, 가장 느림
+```
+
+### 설치 및 기본 사용
+
+```bash
+pip install graphrag
+```
+
+```python
+# 기본 사용 예시
+import asyncio
+from graphrag.query.context_builder.entity_extraction import EntityVectorStoreKey
+from graphrag.query.indexer_adapters import read_indexer_entities, read_indexer_reports
+from graphrag.query.llm.oai.chat_openai import ChatOpenAI
+from graphrag.query.structured_search.global_search.community_context import GlobalCommunityContext
+from graphrag.query.structured_search.global_search.search import GlobalSearch
+
+# 설정
+llm = ChatOpenAI(api_key="YOUR_API_KEY", model="gpt-4o")
+
+# Global Search 실행
+search_engine = GlobalSearch(
+    llm=llm,
+    context_builder=GlobalCommunityContext(...),
+    token_encoder=tiktoken.get_encoding("cl100k_base"),
+    max_data_tokens=12000,
+)
+
+result = await search_engine.asearch("시스템의 주요 구성 요소는 무엇인가요?")
+print(result.response)
+```
+
+### 주의사항
+
+- **비용**: 인덱싱 시 LLM을 대량 호출 → 대용량 문서에서 비용 높음
+- **시간**: 커뮤니티 요약 생성까지 오래 걸림
+- **언어**: 영어 최적화. 한국어는 프롬프트 커스터마이징 필요
+
+---
+
+## ⚡ LightRAG 상세
+
+홍콩대학교에서 개발한 경량 Graph RAG 프레임워크입니다.
+[GitHub: HKUDS/LightRAG](https://github.com/HKUDS/LightRAG)
+
+### 핵심 아이디어
+
+GraphRAG의 무거운 커뮤니티 클러스터링 대신, **듀얼 레벨 검색**으로 빠르고 효과적인 Graph RAG를 구현합니다.
+
+```
+Dual-Level Retrieval:
+  Low-level  (Local)  : 특정 엔티티와 직접 연결된 관계 탐색
+  High-level (Global) : 전체 그래프에서 광범위한 패턴 탐색
+```
+
+### 5가지 검색 모드
+
+```python
+from lightrag import LightRAG, QueryParam
+
+rag = LightRAG(working_dir="./my_rag")
+
+# naive: 기본 벡터 검색 (Knowledge Graph 미사용)
+result = rag.query("질문", param=QueryParam(mode="naive"))
+
+# local: 관련 엔티티 주변 로컬 탐색
+result = rag.query("질문", param=QueryParam(mode="local"))
+
+# global: 전체 그래프의 고수준 패턴 탐색
+result = rag.query("질문", param=QueryParam(mode="global"))
+
+# hybrid: local + global 결합
+result = rag.query("질문", param=QueryParam(mode="hybrid"))
+
+# mix: Knowledge Graph + 벡터 검색 통합 (가장 강력)
+result = rag.query("질문", param=QueryParam(mode="mix"))
+```
+
+### 설치 및 기본 사용
+
+```bash
+pip install lightrag-hku
+```
+
+```python
+import asyncio
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+
+async def main():
+    rag = LightRAG(
+        working_dir="./lightrag_data",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed,
+    )
+
+    # 문서 인덱싱
+    with open("my_document.txt", "r") as f:
+        await rag.ainsert(f.read())
+
+    # 검색
+    result = await rag.aquery(
+        "이 시스템의 핵심 컴포넌트는 무엇인가요?",
+        param=QueryParam(mode="hybrid")
+    )
+    print(result)
+
+asyncio.run(main())
+```
+
+### LightRAG 스토리지 백엔드
+
+```python
+# PostgreSQL 백엔드 사용
+from lightrag.kg.postgres_impl import PostgreSQLStorage
+
+rag = LightRAG(
+    working_dir="./lightrag_data",
+    graph_storage="PostgreSQLStorage",
+    vector_storage="PostgreSQLStorage",
+    kv_storage="PostgreSQLStorage",
+    # PostgreSQL 연결 설정
+    addon_params={
+        "host": "localhost",
+        "port": 5432,
+        "user": "postgres",
+        "password": "password",
+        "database": "lightrag_db",
+    }
+)
+```
+
+---
+
+## 🐘 PostgreSQL로 Knowledge Graph 구현하기
+
+전용 그래프 DB 없이 **PostgreSQL + pgvector만으로** Knowledge Graph 기반 RAG를 구현하는 방법입니다.
+
+### 전체 스키마 설계
+
+```sql
+-- pgvector 확장 활성화
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- 전문 검색용
+
+-- ① 문서 테이블
+CREATE TABLE documents (
+    id          BIGSERIAL PRIMARY KEY,
+    title       TEXT NOT NULL,
+    source      TEXT,               -- 파일 경로, URL 등
+    doc_type    VARCHAR(50),        -- 문서 유형
+    metadata    JSONB DEFAULT '{}',
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ② 청크 테이블 (벡터 포함)
+CREATE TABLE chunks (
+    id          BIGSERIAL PRIMARY KEY,
+    doc_id      BIGINT REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    section_id  VARCHAR(100),       -- 섹션 식별자 (예: "3.2.1")
+    title       TEXT,               -- 섹션 제목
+    content     TEXT NOT NULL,
+    embedding   vector(1024),       -- bge-m3 기준 1024차원
+    chunk_type  VARCHAR(30),        -- 'text', 'table', 'code', 'list'
+    token_count INT,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ③ 엔티티 테이블 (Knowledge Graph 노드)
+CREATE TABLE kg_entities (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    entity_type  VARCHAR(50) NOT NULL,
+    -- 유형 예: 'concept', 'person', 'product', 'technology',
+    --          'process', 'standard', 'term', 'component'
+    description  TEXT,
+    embedding    vector(1024),       -- 엔티티 자체 임베딩
+    metadata     JSONB DEFAULT '{}',
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (name, entity_type)
+);
+
+-- ④ 관계 테이블 (Knowledge Graph 엣지)
+CREATE TABLE kg_relations (
+    id           BIGSERIAL PRIMARY KEY,
+    from_entity  BIGINT REFERENCES kg_entities(id) ON DELETE CASCADE,
+    to_entity    BIGINT REFERENCES kg_entities(id) ON DELETE CASCADE,
+    relation     VARCHAR(100) NOT NULL,
+    -- 관계 유형: 'IS_A', 'PART_OF', 'DEPENDS_ON', 'REFERS_TO',
+    --            'CREATED_BY', 'REQUIRES', 'CONTRADICTS', 'RELATED_TO'
+    description  TEXT,               -- 관계 설명 텍스트
+    weight       FLOAT DEFAULT 1.0,  -- 관계 강도/중요도
+    confidence   FLOAT DEFAULT 1.0,  -- 추출 신뢰도 (LLM 추출 시)
+    source_chunk BIGINT REFERENCES chunks(id),  -- 이 관계가 나온 청크
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ⑤ 청크-엔티티 매핑 (청크에서 어떤 엔티티가 언급됐는지)
+CREATE TABLE kg_chunk_entity (
+    chunk_id    BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
+    entity_id   BIGINT REFERENCES kg_entities(id) ON DELETE CASCADE,
+    mention     TEXT,    -- 실제 텍스트에서 언급된 표현 (동의어 등)
+    PRIMARY KEY (chunk_id, entity_id)
+);
+
+-- ⑥ 직접 참조 관계 (청크 간 단순 참조 — 빠른 구현용)
+CREATE TABLE chunk_relations (
+    id            BIGSERIAL PRIMARY KEY,
+    from_chunk    BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
+    to_chunk      BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
+    relation_type VARCHAR(50) NOT NULL,
+    -- 'references': "3.2절 참조", "위 정의에 따라"
+    -- 'defines'   : 용어 정의
+    -- 'extends'   : 내용 확장/부연
+    -- 'contradicts': 상충/예외
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 인덱스
+CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX ON kg_entities USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX ON kg_entities (name);
+CREATE INDEX ON kg_entities (entity_type);
+CREATE INDEX ON kg_relations (from_entity);
+CREATE INDEX ON kg_relations (to_entity);
+CREATE INDEX ON kg_relations (relation);
+CREATE INDEX ON kg_chunk_entity (chunk_id);
+CREATE INDEX ON kg_chunk_entity (entity_id);
+CREATE INDEX ON chunk_relations (from_chunk);
+CREATE INDEX ON chunk_relations (to_chunk);
+CREATE INDEX ON chunks USING gin(to_tsvector('simple', content));  -- 전문 검색
+```
+
+### 엔티티·관계 추출 (인제스트 시)
+
+#### 방법 1: LLM 기반 추출 (정확도 높음)
+
+```python
+import json
+import anthropic
+
+client = anthropic.Anthropic()
+
+KG_EXTRACT_PROMPT = """
+다음 텍스트에서 핵심 엔티티(개념, 기술, 컴포넌트 등)와 엔티티 간의 관계를 추출하세요.
+
+텍스트:
+{text}
+
+다음 JSON 형식으로 반환하세요. 반드시 JSON만 반환하세요:
+{{
+  "entities": [
+    {{
+      "name": "엔티티 이름",
+      "type": "concept|technology|process|component|person|standard|term",
+      "description": "간단한 설명 (1~2문장)"
+    }}
+  ],
+  "relations": [
+    {{
+      "from": "출발 엔티티 이름",
+      "relation": "IS_A|PART_OF|DEPENDS_ON|REFERS_TO|CREATED_BY|REQUIRES|RELATED_TO",
+      "to": "도착 엔티티 이름",
+      "description": "관계 설명"
+    }}
+  ]
+}}
+
+주의사항:
+- 텍스트에 명시적으로 나타난 관계만 추출하세요
+- 엔티티 이름은 정확하고 일관성 있게 작성하세요
+- 불명확한 관계는 포함하지 마세요
+"""
+
+def extract_kg_from_chunk(chunk_text: str) -> dict:
+    """청크 텍스트에서 KG 엔티티와 관계 추출"""
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        messages=[{
+            "role": "user",
+            "content": KG_EXTRACT_PROMPT.format(text=chunk_text)
+        }]
+    )
+
+    try:
+        return json.loads(response.content[0].text)
+    except json.JSONDecodeError:
+        # JSON 파싱 실패 시 빈 결과 반환
+        return {"entities": [], "relations": []}
+```
+
+#### 방법 2: 정규식 기반 추출 (빠름, 패턴이 명확한 경우)
+
+```python
+import re
+from typing import list
+
+# 문서 내 참조 패턴 정의
+REFERENCE_PATTERNS = {
+    "section": r'(\d+(?:\.\d+)*)절',              # "3.2절", "5.1.3절"
+    "chapter": r'제(\d+)장',                      # "제3장"
+    "appendix": r'부록\s*([A-Z\d]+)',             # "부록A", "부록1"
+    "figure": r'그림\s*(\d+(?:\.\d+)*)',          # "그림 3.2"
+    "table": r'표\s*(\d+(?:\.\d+)*)',             # "표 2.1"
+    "definition": r'"([^"]{2,30})"(?:이란|이라 함)', # 정의 패턴
+}
+
+def extract_references_by_pattern(content: str) -> list[dict]:
+    """정규식으로 참조 패턴 추출"""
+    refs = []
+    for ref_type, pattern in REFERENCE_PATTERNS.items():
+        for match in re.finditer(pattern, content):
+            refs.append({
+                "type": ref_type,
+                "value": match.group(1),
+                "full_match": match.group(0),
+                "position": match.start()
+            })
+    return refs
+
+def build_chunk_relations_from_patterns(
+    chunks: list[dict],
+    section_map: dict[str, int]  # section_id → chunk_id
+) -> list[dict]:
+    """패턴 기반으로 청크 간 참조 관계 생성"""
+    relations = []
+    for chunk in chunks:
+        refs = extract_references_by_pattern(chunk["content"])
+        for ref in refs:
+            target_id = section_map.get(ref["value"])
+            if target_id and target_id != chunk["id"]:
+                relations.append({
+                    "from_chunk": chunk["id"],
+                    "to_chunk": target_id,
+                    "relation_type": "references"
+                })
+    return relations
+```
+
+### Recursive CTE로 그래프 탐색
+
+PostgreSQL의 `WITH RECURSIVE`를 사용해 Knowledge Graph를 n-hop 탐색합니다.
+
+#### 엔티티 중심 탐색
+
+```sql
+-- 특정 엔티티에서 시작해 연결된 엔티티를 최대 2-hop 탐색
+WITH RECURSIVE entity_traversal AS (
+    -- 시작 엔티티 (벡터 검색으로 찾은 관련 청크의 엔티티들)
+    SELECT
+        kce.entity_id,
+        0 AS depth,
+        ARRAY[kce.entity_id] AS path  -- 순환 방지용 경로 추적
+    FROM kg_chunk_entity kce
+    WHERE kce.chunk_id = ANY(:initial_chunk_ids)
+
+    UNION
+
+    -- 관계를 따라 이웃 엔티티 탐색
+    SELECT
+        CASE
+            WHEN r.from_entity = t.entity_id THEN r.to_entity
+            ELSE r.from_entity
+        END AS entity_id,
+        t.depth + 1,
+        t.path || CASE
+            WHEN r.from_entity = t.entity_id THEN r.to_entity
+            ELSE r.from_entity
+        END
+    FROM entity_traversal t
+    JOIN kg_relations r
+        ON r.from_entity = t.entity_id
+        OR r.to_entity = t.entity_id
+    WHERE
+        t.depth < :max_hops                         -- 최대 탐색 깊이
+        AND NOT (CASE                               -- 순환 방지
+            WHEN r.from_entity = t.entity_id THEN r.to_entity
+            ELSE r.from_entity
+        END = ANY(t.path))
+)
+-- 탐색된 엔티티가 언급된 청크 반환
+SELECT DISTINCT
+    c.id,
+    c.content,
+    c.section_id,
+    c.title,
+    MIN(t.depth) AS graph_distance  -- 최단 거리
+FROM entity_traversal t
+JOIN kg_chunk_entity kce ON kce.entity_id = t.entity_id
+JOIN chunks c ON c.id = kce.chunk_id
+WHERE c.id != ALL(:initial_chunk_ids)  -- 이미 포함된 청크 제외
+GROUP BY c.id, c.content, c.section_id, c.title
+ORDER BY graph_distance;
+```
+
+#### 벡터 검색 + 그래프 탐색 통합 쿼리
+
+```sql
+WITH
+-- 1단계: 벡터 검색으로 초기 청크 탐색
+vector_results AS (
+    SELECT
+        id,
+        content,
+        section_id,
+        title,
+        1 - (embedding <=> :query_embedding::vector) AS similarity,
+        0 AS graph_distance,
+        'vector' AS source
+    FROM chunks
+    ORDER BY embedding <=> :query_embedding::vector
+    LIMIT :top_k
+),
+-- 2단계: 초기 청크의 엔티티 확인
+initial_entities AS (
+    SELECT DISTINCT kce.entity_id
+    FROM kg_chunk_entity kce
+    JOIN vector_results vr ON vr.id = kce.chunk_id
+),
+-- 3단계: Knowledge Graph 탐색 (2-hop)
+graph_traversal AS (
+    SELECT entity_id, 1 AS depth
+    FROM initial_entities
+
+    UNION
+
+    SELECT
+        CASE WHEN r.from_entity = t.entity_id THEN r.to_entity
+             ELSE r.from_entity END,
+        t.depth + 1
+    FROM graph_traversal t
+    JOIN kg_relations r
+        ON r.from_entity = t.entity_id OR r.to_entity = t.entity_id
+    WHERE t.depth < 2
+),
+-- 4단계: 그래프로 확장된 청크
+graph_results AS (
+    SELECT DISTINCT
+        c.id,
+        c.content,
+        c.section_id,
+        c.title,
+        0.0 AS similarity,
+        MIN(gt.depth) AS graph_distance,
+        'graph' AS source
+    FROM graph_traversal gt
+    JOIN kg_chunk_entity kce ON kce.entity_id = gt.entity_id
+    JOIN chunks c ON c.id = kce.chunk_id
+    WHERE c.id NOT IN (SELECT id FROM vector_results)
+    GROUP BY c.id, c.content, c.section_id, c.title
+)
+-- 최종: 벡터 결과 + 그래프 확장 결과 통합
+SELECT * FROM vector_results
+UNION ALL
+SELECT * FROM graph_results
+ORDER BY
+    CASE source
+        WHEN 'vector' THEN (1 - similarity)     -- 유사도 낮을수록 후순위
+        WHEN 'graph'  THEN graph_distance + 1   -- 거리 멀수록 후순위
+    END;
+```
+
+---
+
+## 🐍 Python 통합 구현
+
+### 프로젝트 구조
+
+```
+my_kg_rag/
+├── app/
+│   ├── db/
+│   │   ├── connection.py       # DB 연결
+│   │   └── models.py           # ORM 모델
+│   ├── services/
+│   │   ├── parser.py           # 문서 파싱
+│   │   ├── chunker.py          # 청킹
+│   │   ├── embedder.py         # 임베딩
+│   │   ├── kg_extractor.py     # KG 엔티티/관계 추출
+│   │   ├── kg_search.py        # KG 기반 검색 확장
+│   │   └── rag_service.py      # RAG 오케스트레이터
+│   └── api/
+│       └── routes.py           # FastAPI 엔드포인트
+├── scripts/
+│   ├── init_db.py              # DB 초기화
+│   └── ingest.py               # 문서 인덱싱 CLI
+└── requirements.txt
+```
+
+### 인덱싱 파이프라인
+
+```python
+# scripts/ingest.py
+import asyncio
+from pathlib import Path
+from app.services.parser import parse_document
+from app.services.chunker import chunk_text
+from app.services.embedder import embed_chunks
+from app.services.kg_extractor import extract_and_save_kg
+from app.db.connection import get_db_session
+
+async def ingest_document(file_path: str):
+    """문서 인덱싱 전체 파이프라인"""
+    async with get_db_session() as db:
+        # 1. 문서 파싱
+        print(f"[1/5] 파싱: {file_path}")
+        text_content = parse_document(file_path)
+
+        # 2. 문서 메타데이터 저장
+        doc = await db.execute(
+            "INSERT INTO documents (title, source) VALUES (:title, :source) RETURNING id",
+            {"title": Path(file_path).stem, "source": file_path}
+        )
+        doc_id = doc.scalar()
+
+        # 3. 청킹
+        print("[2/5] 청킹...")
+        chunks = chunk_text(text_content, doc_id=doc_id)
+
+        # 4. 임베딩 + 저장
+        print("[3/5] 임베딩...")
+        chunks_with_embeddings = await embed_chunks(chunks)
+        chunk_ids = await save_chunks(db, chunks_with_embeddings)
+
+        # 5. Knowledge Graph 추출
+        print("[4/5] Knowledge Graph 추출...")
+        for chunk, chunk_id in zip(chunks, chunk_ids):
+            await extract_and_save_kg(db, chunk["content"], chunk_id)
+
+        # 6. 청크 간 직접 참조 관계 추출
+        print("[5/5] 참조 관계 구축...")
+        await build_chunk_relations(db, chunks, chunk_ids)
+
+        print(f"완료: {len(chunks)}개 청크, doc_id={doc_id}")
+```
+
+### Knowledge Graph 추출 서비스
+
+```python
+# app/services/kg_extractor.py
+import json
+import anthropic
+from sqlalchemy.ext.asyncio import AsyncSession
+
+client = anthropic.Anthropic()
+
+KG_EXTRACT_PROMPT = """
+다음 텍스트에서 핵심 엔티티와 관계를 추출하세요.
+
+텍스트:
+{text}
+
+JSON 형식으로만 반환하세요:
+{{
+  "entities": [
+    {{"name": "이름", "type": "concept|technology|process|component|term", "description": "설명"}}
+  ],
+  "relations": [
+    {{"from": "엔티티명", "relation": "IS_A|PART_OF|DEPENDS_ON|REFERS_TO|REQUIRES|RELATED_TO", "to": "엔티티명", "description": "관계 설명"}}
+  ]
+}}
+"""
+
+async def extract_and_save_kg(
+    db: AsyncSession,
+    chunk_text: str,
+    chunk_id: int
+):
+    """청크에서 KG 추출 후 DB 저장"""
+    # LLM으로 추출
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        messages=[{"role": "user", "content": KG_EXTRACT_PROMPT.format(text=chunk_text)}]
+    )
+
+    try:
+        kg_data = json.loads(response.content[0].text)
+    except json.JSONDecodeError:
+        return  # 파싱 실패 시 건너뜀
+
+    entity_id_map = {}
+
+    # 엔티티 저장 (중복 시 기존 ID 사용)
+    for ent in kg_data.get("entities", []):
+        result = await db.execute(
+            """
+            INSERT INTO kg_entities (name, entity_type, description)
+            VALUES (:name, :type, :desc)
+            ON CONFLICT (name, entity_type) DO UPDATE SET description = EXCLUDED.description
+            RETURNING id
+            """,
+            {"name": ent["name"], "type": ent["type"], "desc": ent.get("description", "")}
+        )
+        entity_id = result.scalar()
+        entity_id_map[ent["name"]] = entity_id
+
+        # 청크-엔티티 매핑
+        await db.execute(
+            """
+            INSERT INTO kg_chunk_entity (chunk_id, entity_id)
+            VALUES (:chunk_id, :entity_id)
+            ON CONFLICT DO NOTHING
+            """,
+            {"chunk_id": chunk_id, "entity_id": entity_id}
+        )
+
+    # 관계 저장
+    for rel in kg_data.get("relations", []):
+        from_id = entity_id_map.get(rel["from"])
+        to_id = entity_id_map.get(rel["to"])
+        if from_id and to_id:
+            await db.execute(
+                """
+                INSERT INTO kg_relations (from_entity, to_entity, relation, description, source_chunk)
+                VALUES (:from, :to, :rel, :desc, :chunk)
+                ON CONFLICT DO NOTHING
+                """,
+                {
+                    "from": from_id, "to": to_id,
+                    "rel": rel["relation"], "desc": rel.get("description", ""),
+                    "chunk": chunk_id
+                }
+            )
+
+    await db.commit()
+```
+
+### Knowledge Graph 검색 확장 서비스
+
+```python
+# app/services/kg_search.py
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+KG_EXPAND_SQL = """
+WITH RECURSIVE entity_traversal AS (
+    SELECT kce.entity_id, 0 AS depth, ARRAY[kce.entity_id] AS path
+    FROM kg_chunk_entity kce
+    WHERE kce.chunk_id = ANY(:chunk_ids)
+
+    UNION
+
+    SELECT
+        CASE WHEN r.from_entity = t.entity_id THEN r.to_entity ELSE r.from_entity END,
+        t.depth + 1,
+        t.path || CASE WHEN r.from_entity = t.entity_id THEN r.to_entity ELSE r.from_entity END
+    FROM entity_traversal t
+    JOIN kg_relations r ON r.from_entity = t.entity_id OR r.to_entity = t.entity_id
+    WHERE t.depth < :max_hops
+      AND NOT (CASE WHEN r.from_entity = t.entity_id THEN r.to_entity ELSE r.from_entity END = ANY(t.path))
+)
+SELECT DISTINCT c.id, c.content, c.section_id, c.title, MIN(t.depth) AS depth
+FROM entity_traversal t
+JOIN kg_chunk_entity kce ON kce.entity_id = t.entity_id
+JOIN chunks c ON c.id = kce.chunk_id
+WHERE c.id != ALL(:chunk_ids)
+GROUP BY c.id, c.content, c.section_id, c.title
+ORDER BY depth
+LIMIT :expand_limit;
+"""
+
+async def expand_with_knowledge_graph(
+    initial_chunk_ids: list[int],
+    db: AsyncSession,
+    max_hops: int = 2,
+    expand_limit: int = 5
+) -> list[dict]:
+    """Knowledge Graph로 검색 컨텍스트 확장"""
+    if not initial_chunk_ids:
+        return []
+
+    result = await db.execute(
+        text(KG_EXPAND_SQL),
+        {
+            "chunk_ids": initial_chunk_ids,
+            "max_hops": max_hops,
+            "expand_limit": expand_limit
+        }
+    )
+    rows = result.fetchall()
+    return [dict(row._mapping) for row in rows]
+```
+
+### RAG 오케스트레이터
+
+```python
+# app/services/rag_service.py
+from app.services.embedder import embed_text
+from app.services.kg_search import expand_with_knowledge_graph
+
+async def answer_with_kg_rag(
+    question: str,
+    db: AsyncSession,
+    top_k: int = 5,
+    use_kg: bool = True,
+    max_hops: int = 2
+) -> str:
+    """Knowledge Graph RAG로 질문에 답변"""
+
+    # 1. 질문 임베딩
+    query_embedding = await embed_text(question)
+
+    # 2. 벡터 검색
+    vector_results = await db.execute(
+        text("""
+            SELECT id, content, section_id, title,
+                   1 - (embedding <=> :emb::vector) AS similarity
+            FROM chunks
+            ORDER BY embedding <=> :emb::vector
+            LIMIT :k
+        """),
+        {"emb": query_embedding, "k": top_k}
+    )
+    initial_chunks = [dict(r._mapping) for r in vector_results.fetchall()]
+    initial_ids = [c["id"] for c in initial_chunks]
+
+    # 3. Knowledge Graph로 컨텍스트 확장
+    expanded_chunks = []
+    if use_kg:
+        expanded_chunks = await expand_with_knowledge_graph(
+            initial_ids, db, max_hops=max_hops
+        )
+
+    # 4. 전체 컨텍스트 조합
+    all_chunks = initial_chunks + expanded_chunks
+    context = "\n\n---\n\n".join([
+        f"[{c.get('title', '섹션')}]\n{c['content']}"
+        for c in all_chunks
+    ])
+
+    # 5. LLM으로 답변 생성
+    import anthropic
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        messages=[{
+            "role": "user",
+            "content": f"""다음 컨텍스트를 참고하여 질문에 답하세요.
+
+컨텍스트:
+{context}
+
+질문: {question}
+
+답변:"""
+        }]
+    )
+    return response.content[0].text
+```
+
+---
+
+## 🎯 언제 무엇을 선택할까
+
+### 의사결정 트리
+
+```
+문서 간 참조/관계가 복잡한가?
+  ├─ No  → Standard RAG로 충분 (simpler is better)
+  └─ Yes → Graph RAG 고려
+              │
+              ├─ 인프라 제약이 있는가?
+              │    └─ Yes → PostgreSQL 직접 구현
+              │
+              ├─ 전체 문서셋 요약/전반적 질의가 많은가?
+              │    └─ Yes → Microsoft GraphRAG (Global Search)
+              │
+              ├─ 빠른 프로토타이핑이 필요한가?
+              │    └─ Yes → LightRAG
+              │
+              └─ 강력한 그래프 쿼리/시각화가 필요한가?
+                   └─ Yes → Neo4j + LangChain
+```
+
+### 문서 유형별 추천
+
+| 문서 유형 | 추천 방식 | 이유 |
+|-----------|-----------|------|
+| 기술 문서 / API 레퍼런스 | Knowledge Graph RAG | 컴포넌트 간 의존성, 용어 정의 연결 |
+| 법률 / 규정 문서 | Knowledge Graph RAG | 조항 간 상호 참조, 예외 조항 연결 |
+| 기업 지식베이스 | LightRAG or GraphRAG | 부서 간 업무 연결, 프로세스 체인 |
+| 연구 논문 | GraphRAG | 개념 간 관계, 인용 네트워크 |
+| 제품 매뉴얼 | PostgreSQL KG (간단) | 기능 간 참조, 트러블슈팅 연결 |
+| FAQ / 블로그 | Standard RAG | 독립적 콘텐츠, 관계 적음 |
+| 뉴스 / SNS | Standard RAG | 실시간성 중요, 관계 단순 |
+
+### 단계별 도입 전략
+
+```
+Phase 1 (빠른 시작)
+  → Standard RAG 구현
+  → 답변 품질 베이스라인 측정
+
+Phase 2 (Graph RAG 간단 도입)
+  → chunk_relations 테이블 추가
+  → 정규식으로 명시적 참조 관계 추출
+  → 검색 시 참조 청크 포함
+  → 품질 개선 측정
+
+Phase 3 (Knowledge Graph 본격 도입)
+  → kg_entities + kg_relations 테이블 추가
+  → LLM으로 엔티티·관계 추출
+  → Recursive CTE로 다단계 탐색
+  → 복합 질의 성능 검증
+
+Phase 4 (고도화)
+  → 커뮤니티 클러스터링
+  → 커뮤니티 요약 생성
+  → 전체 데이터셋 요약 질의 지원
+```
+
+---
+
+## 📄 PDF 파서 선택 가이드
+
+Knowledge Graph RAG 시스템에서 문서 인제스트의 첫 단계는 PDF 파싱입니다. 파서 품질이 KG 추출 품질에 직접 영향을 줍니다.
+
+### 파서 비교표
+
+| 파서 | 텍스트 추출 | 표 구조 | 수식/이미지 | OCR | 속도(CPU) | 설치 |
+|------|------------|---------|------------|-----|-----------|------|
+| **Docling** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ✅ | 중간 | 간단 |
+| **pdfplumber** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ❌ | ❌ | 빠름 | 간단 |
+| **PyMuPDF (fitz)** | ⭐⭐⭐⭐ | ⭐⭐ | ❌ | ❌ | 매우 빠름 | 간단 |
+| **Marker** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ✅ | 매우 느림 | 복잡 |
+
+### 추천 선택
+
+```
+텍스트 레이어가 있는 PDF (일반 문서)
+  → Docling (OCR 비활성화) 또는 pdfplumber
+  → 이유: 빠르고 구조 보존 우수
+
+스캔된 PDF (이미지 기반)
+  → Docling (OCR 활성화)
+  → 이유: OCR + 구조 인식 결합
+
+표/그래프가 많은 기술 문서
+  → Docling
+  → 이유: 표 구조를 Markdown으로 변환
+
+빠른 처리가 최우선
+  → PyMuPDF (fitz)
+  → 이유: 가장 빠른 속도
+```
+
+### Docling 기본 사용
+
+```python
+from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+# OCR 비활성화 (텍스트 레이어 PDF, 빠름)
+pipeline_options = PdfPipelineOptions()
+pipeline_options.do_ocr = False
+
+converter = DocumentConverter(pipeline_options=pipeline_options)
+result = converter.convert("document.pdf")
+markdown_text = result.document.export_to_markdown()
+```
+
+```python
+# OCR 활성화 (스캔 PDF)
+pipeline_options = PdfPipelineOptions()
+pipeline_options.do_ocr = True
+
+converter = DocumentConverter(pipeline_options=pipeline_options)
+result = converter.convert("scanned_document.pdf")
+markdown_text = result.document.export_to_markdown()
+```
+
+---
+
+## 🔧 트러블슈팅
+
+### pgvector 관련
+
+```sql
+-- pgvector 확장이 없을 때
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 차원 불일치 오류
+-- 임베딩 모델 변경 시 기존 데이터와 차원이 다를 수 있음
+-- 해결: 새 컬럼 추가 후 마이그레이션
+ALTER TABLE chunks ADD COLUMN embedding_new vector(768);
+-- 기존 데이터 변환 후 컬럼 교체
+```
+
+### Recursive CTE 무한 루프 방지
+
+```sql
+-- 반드시 순환 방지 조건 추가
+WHERE t.depth < :max_hops                    -- 최대 깊이 제한
+  AND NOT (next_entity = ANY(t.path))        -- 방문한 노드 재방문 금지
+```
+
+### Docling libxcb 오류 (Linux/Docker)
+
+```bash
+# 오류: libxcb.so.1: cannot open shared object file
+apt-get install -y libxcb1 libgl1 libglib2.0-0
+```
+
+### Docling OCR 비활성화로 속도 개선
+
+```python
+# 텍스트 레이어가 있는 PDF에서 OCR 비활성화
+# → 처리 속도 대폭 향상 (OCR 활성화 대비 10~20배 빠름)
+pipeline_options.do_ocr = False
+```
+
+### LLM 기반 KG 추출 비용 절감
+
+```python
+# 모든 청크에 LLM 추출 적용하면 비용 큼
+# → 중요 섹션만 선택적으로 적용
+
+def should_extract_kg(chunk: dict) -> bool:
+    """KG 추출 대상 청크 필터링"""
+    # 너무 짧은 청크 제외
+    if len(chunk["content"]) < 200:
+        return False
+    # 목차, 페이지 번호 등 제외
+    if chunk.get("chunk_type") in ["header", "footer", "toc"]:
+        return False
+    return True
+```
+
+### PostgreSQL Recursive CTE 성능 최적화
+
+```sql
+-- 탐색 전 인덱스 확인
+EXPLAIN ANALYZE WITH RECURSIVE ...
+
+-- 필요한 인덱스
+CREATE INDEX ON kg_relations (from_entity, to_entity);
+CREATE INDEX ON kg_chunk_entity (entity_id, chunk_id);
+
+-- max_hops를 너무 크게 설정하지 말 것 (3 이상은 성능 급락)
+-- 대부분의 경우 max_hops=2면 충분
+```
+
+---
+
+## 📚 참고 자료
+
+### 논문
+
+- [RAG 원본 논문 (Lewis et al., 2020)](https://arxiv.org/abs/2005.11401)
+- [From Local to Global: A Graph RAG Approach (Microsoft, 2024)](https://arxiv.org/abs/2404.16130)
+- [LightRAG: Simple and Fast Retrieval-Augmented Generation (HKUDS, 2024)](https://arxiv.org/abs/2410.05779)
+
+### 공식 문서
+
+- [Microsoft GraphRAG GitHub](https://github.com/microsoft/graphrag)
+- [LightRAG GitHub](https://github.com/HKUDS/LightRAG)
+- [pgvector GitHub](https://github.com/pgvector/pgvector)
+- [Docling GitHub](https://github.com/DS4SD/docling)
+- [PostgreSQL Recursive CTE 공식 문서](https://www.postgresql.org/docs/current/queries-with.html)
+
+### 관련 가이드
+
+- [arabangoo.com](https://arabangoo.com/)
+- [PostgreSQL 공식 웹사이트](https://www.postgresql.org/)
+- [Supabase AI & Vector 가이드](https://supabase.com/docs/guides/ai)
+- [MongoDB Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search)
