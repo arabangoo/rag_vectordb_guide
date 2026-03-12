@@ -20,6 +20,7 @@
 - [LightRAG 상세](#-lightrag-상세)
 - [PostgreSQL로 Knowledge Graph 구현하기](#-postgresql로-knowledge-graph-구현하기)
 - [Python 통합 구현](#-python-통합-구현)
+- [한국어 임베딩 모델 선택 가이드](#-한국어-임베딩-모델-선택-가이드)
 - [언제 무엇을 선택할까](#-언제-무엇을-선택할까)
 - [PDF 파서 선택 가이드](#-pdf-파서-선택-가이드)
 - [트러블슈팅](#-트러블슈팅)
@@ -210,7 +211,7 @@ Knowledge Graph 구축 (노드 + 엣지)
 | **컨텍스트 범위** | 유사한 청크들 | 유사한 청크 + 관계로 연결된 청크들 |
 | **다단계 추론** | ❌ 불가 | ✅ 그래프 체인 탐색 |
 | **전체 구조 파악** | ❌ 어려움 | ✅ 커뮤니티 요약 활용 |
-| **구현 복잡도** | 낮음 | 중간~높음 |
+| **구현 복잡도** | 낮음 | 중간-높음 |
 | **인제스트 비용** | 낮음 | 높음 (관계 추출 필요) |
 | **검색 속도** | 빠름 | 상대적으로 느림 |
 | **적합한 문서** | 독립적 콘텐츠 | 상호 참조가 많은 문서 |
@@ -553,17 +554,21 @@ CREATE TABLE documents (
 
 -- ② 청크 테이블 (벡터 포함)
 CREATE TABLE chunks (
-    id          BIGSERIAL PRIMARY KEY,
-    doc_id      BIGINT REFERENCES documents(id) ON DELETE CASCADE,
-    chunk_index INT NOT NULL,
-    section_id  VARCHAR(100),       -- 섹션 식별자 (예: "3.2.1")
-    title       TEXT,               -- 섹션 제목
-    content     TEXT NOT NULL,
-    embedding   vector(1024),       -- bge-m3 기준 1024차원
-    chunk_type  VARCHAR(30),        -- 'text', 'table', 'code', 'list'
-    token_count INT,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    id           BIGSERIAL PRIMARY KEY,
+    doc_id       BIGINT REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index  INT NOT NULL,
+    section_id   VARCHAR(100),       -- 섹션 식별자 (예: "3.2.1")
+    title        TEXT,               -- 섹션 제목
+    content      TEXT NOT NULL,
+    content_hash VARCHAR(64),        -- SHA-256: 동일 내용 중복 인덱싱 방지
+    embedding    vector(1024),       -- KURE-v1 / bge-m3 계열 기준 1024차원
+    chunk_type   VARCHAR(30),        -- 'text', 'table', 'code', 'list'
+    token_count  INT,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- content_hash 인덱스 (중복 체크용)
+CREATE UNIQUE INDEX ON chunks (content_hash) WHERE content_hash IS NOT NULL;
 
 -- ③ 엔티티 테이블 (Knowledge Graph 노드)
 CREATE TABLE kg_entities (
@@ -652,7 +657,7 @@ KG_EXTRACT_PROMPT = """
     {{
       "name": "엔티티 이름",
       "type": "concept|technology|process|component|person|standard|term",
-      "description": "간단한 설명 (1~2문장)"
+      "description": "간단한 설명 (1-2문장)"
     }}
   ],
   "relations": [
@@ -917,10 +922,10 @@ async def ingest_document(file_path: str):
         print("[2/5] 청킹...")
         chunks = chunk_text(text_content, doc_id=doc_id)
 
-        # 4. 임베딩 + 저장
+        # 4. 임베딩 + 저장 (content_hash 기반 중복 제거)
         print("[3/5] 임베딩...")
         chunks_with_embeddings = await embed_chunks(chunks)
-        chunk_ids = await save_chunks(db, chunks_with_embeddings)
+        chunk_ids = await save_chunks_with_dedup(db, chunks_with_embeddings)
 
         # 5. Knowledge Graph 추출
         print("[4/5] Knowledge Graph 추출...")
@@ -1152,6 +1157,84 @@ async def answer_with_kg_rag(
 
 ---
 
+## 🇰🇷 한국어 임베딩 모델 선택 가이드
+
+한국어 문서에 RAG를 구축할 경우 임베딩 모델 선택이 검색 품질에 큰 영향을 미칩니다.
+
+### 벤치마크 비교 (MTEB-ko-retrieval NDCG@10)
+
+| 모델 | NDCG | 차원 | 토큰 제한 | 비용 | 특징 |
+|------|------|------|---------|------|------|
+| **nlpai-lab/KURE-v1** | **0.655** | 1024 | 8192 | 무료 | bge-m3 기반 한국어 파인튜닝, 한국어 검색 1위 |
+| dragonkue/BGE-m3-ko | 0.649 | 1024 | 8192 | 무료 | 한국어 금융/뉴스 코퍼스 파인튜닝 |
+| BAAI/bge-m3 | 0.646 | 1024 | 8192 | 무료 | 100개+ 언어 지원, 장문 처리 강점 |
+| intfloat/multilingual-e5-large | 0.628 | 1024 | **512** | 무료 | 512 토큰 제한으로 장문 문서 불리 |
+| OpenAI text-embedding-3-large | 0.573 | 3072 | 8191 | $0.13/1M | API 호출, GPU 불필요 |
+
+### 선택 기준
+
+```
+한국어 정밀도가 최우선이고 장문 문서를 다룬다
+  → nlpai-lab/KURE-v1 (추천)
+  → 이유: MTEB-ko 1위, 8192 토큰, bge-m3와 동급 속도
+
+한국어 금융/법률 도메인 특화가 필요하다
+  → dragonkue/BGE-m3-ko
+  → 이유: 금융 코퍼스 파인튜닝, 장문 처리 가능
+
+다국어(영어 포함) 문서를 함께 다룬다
+  → BAAI/bge-m3
+  → 이유: 100개+ 언어 지원, Dense+Sparse+ColBERT 하이브리드
+
+로컬 모델 서빙 없이 API로 처리하고 싶다
+  → OpenAI text-embedding-3-large
+  → 이유: GPU 불필요, 전체 코퍼스 임베딩 비용 약 $0.20 수준
+
+※ KoSimCSE, ko-sroberta-multitask, KoE5는 512 토큰 제한으로
+  장문 문서 RAG에는 부적합
+```
+
+### CPU 환경 임베딩 속도 예측
+
+KURE-v1 / BGE-m3-ko / bge-m3는 모두 동일한 XLM-RoBERTa 24 레이어 백본 구조로
+CPU 추론 속도가 사실상 동일합니다.
+
+- chunk당 400-800 토큰 기준: 수천 개 chunk 처리에 20-60분 (1회성 배치)
+- 실시간 질의 시 query 임베딩만 수행 → 수십 ms 수준
+
+### 모델 전환 방법
+
+벡터 차원이 동일(1024)한 모델 간 전환은 EmbeddingService 클래스만 교체하면 됩니다.
+OpenAI text-embedding-3-large(3072차원)로 전환 시에는 DB `vector(1024)` → `vector(3072)` 수정 필요.
+
+```python
+# app/services/embedder.py
+
+from sentence_transformers import SentenceTransformer
+
+# 1순위: 한국어 특화
+MODEL_NAME = "nlpai-lab/KURE-v1"
+
+# 차선책: OpenAI API
+# from openai import OpenAI
+# client = OpenAI()
+
+model = SentenceTransformer(MODEL_NAME)
+
+def embed_text(text: str) -> list[float]:
+    return model.encode(text, normalize_embeddings=True).tolist()
+
+def embed_batch(texts: list[str], batch_size: int = 100) -> list[list[float]]:
+    results = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        embeddings = model.encode(batch, normalize_embeddings=True)
+        results.extend(embeddings.tolist())
+    return results
+```
+
+---
+
 ## 🎯 언제 무엇을 선택할까
 
 ### 의사결정 트리
@@ -1251,25 +1334,56 @@ Knowledge Graph RAG 시스템에서 문서 인제스트의 첫 단계는 PDF 파
 ```python
 from docling.document_converter import DocumentConverter
 from docling.datamodel.pipeline_options import PdfPipelineOptions
+import fitz  # PyMuPDF
 
-# OCR 비활성화 (텍스트 레이어 PDF, 빠름)
-pipeline_options = PdfPipelineOptions()
-pipeline_options.do_ocr = False
+def has_text_layer(pdf_path: str, sample_pages: int = 3) -> bool:
+    """텍스트 레이어 유무 자동 판별 — OCR 필요 여부 결정"""
+    doc = fitz.open(pdf_path)
+    for page in doc[:sample_pages]:
+        if len(page.get_text().strip()) > 50:
+            return True
+    return False
 
-converter = DocumentConverter(pipeline_options=pipeline_options)
-result = converter.convert("document.pdf")
-markdown_text = result.document.export_to_markdown()
+def parse_pdf_to_markdown(pdf_path: str) -> str:
+    """
+    텍스트 레이어 유무를 자동 감지하여 OCR 활성/비활성화 결정.
+    텍스트 레이어가 있는 PDF는 OCR 비활성화로 속도 향상.
+    스캔 PDF는 자동으로 OCR 활성화 전환.
+    """
+    use_ocr = not has_text_layer(pdf_path)
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = use_ocr
+
+    converter = DocumentConverter(pipeline_options=pipeline_options)
+    result = converter.convert(pdf_path)
+    return result.document.export_to_markdown()
 ```
 
-```python
-# OCR 활성화 (스캔 PDF)
-pipeline_options = PdfPipelineOptions()
-pipeline_options.do_ocr = True
+> **실측 성능 (CPU 환경 기준)**
+> - 텍스트 레이어 있는 일반 문서 (100-200페이지): 2-8분/파일
+> - 병목 구간: DocLayNet 레이아웃 분석 (OCR 활성/비활성 관계없이 동일)
+> - 이미지 기반 표·도해는 `<!-- image -->` 로 처리되어 내용 손실 발생
 
-converter = DocumentConverter(pipeline_options=pipeline_options)
-result = converter.convert("scanned_document.pdf")
-markdown_text = result.document.export_to_markdown()
+### Docker 환경에서 Docling 모델 캐싱
+
+Docling은 처음 실행 시 HuggingFace에서 모델 파일(약 300MB)을 다운로드합니다.
+컨테이너가 재시작될 때마다 재다운로드되는 것을 방지하려면 Docker named volume을 사용하세요.
+
+```bash
+# named volume 생성 (최초 1회)
+docker volume create hf_model_cache
+
+# 컨테이너 실행 시 모델 캐시 볼륨 마운트
+docker run --rm \
+  -v hf_model_cache:/root/.cache/huggingface \
+  -v $(pwd)/pdfs:/pdfs \
+  my-docling-image \
+  python ingest.py
 ```
+
+> **주의**: HuggingFace는 XetHub 방식으로 대용량 파일을 배포하며, pre-signed S3 URL이 수 시간 후 만료됩니다.
+> 다운로드 도중 컨테이너가 중단되면 `.incomplete` 파일이 남고 재시작 시 이어받기를 시도합니다.
+> named volume을 사용하면 한 번 다운로드 후 영구 보존됩니다.
 
 ---
 
@@ -1296,6 +1410,32 @@ WHERE t.depth < :max_hops                    -- 최대 깊이 제한
   AND NOT (next_entity = ANY(t.path))        -- 방문한 노드 재방문 금지
 ```
 
+### HuggingFace 모델 다운로드 중단 (Docker 환경)
+
+```
+증상: Docling/임베딩 모델 다운로드 중 컨테이너가 수 시간째 멈춤
+원인: HuggingFace XetHub pre-signed S3 URL 만료 (수 시간 후 403 Forbidden)
+```
+
+```bash
+# 해결: Docker named volume으로 모델 영구 캐싱
+docker volume create hf_model_cache
+
+docker run --rm \
+  -v hf_model_cache:/root/.cache/huggingface \
+  my-image python my_script.py
+
+# 이미 다운로드된 파일을 volume으로 복사 (기존 컨테이너에서 복구 시)
+docker cp <container_id>:/root/.cache/huggingface/hub ./hf_backup
+
+docker run --rm \
+  -v hf_model_cache:/root/.cache/huggingface \
+  -v ./hf_backup:/hf_backup \
+  alpine cp -r /hf_backup/hub /root/.cache/huggingface/
+```
+
+> `.incomplete` 파일이 남아 있으면 삭제 후 재시작 시 처음부터 재다운로드합니다.
+
 ### Docling libxcb 오류 (Linux/Docker)
 
 ```bash
@@ -1307,7 +1447,7 @@ apt-get install -y libxcb1 libgl1 libglib2.0-0
 
 ```python
 # 텍스트 레이어가 있는 PDF에서 OCR 비활성화
-# → 처리 속도 대폭 향상 (OCR 활성화 대비 10~20배 빠름)
+# → 처리 속도 대폭 향상 (OCR 활성화 대비 10-20배 빠름)
 pipeline_options.do_ocr = False
 ```
 
