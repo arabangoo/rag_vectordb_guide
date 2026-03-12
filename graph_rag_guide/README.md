@@ -1296,6 +1296,74 @@ Phase 4 (고도화)
 
 ---
 
+## 🏗 언어 선택 — Python vs JVM (Java/Kotlin)
+
+> Graph RAG 파이프라인을 구축할 때 자주 받는 질문: "나중에 Java로 바꿔도 되나요?"
+
+### 결론
+
+**ML 파이프라인(임베딩·파싱·RAG 쿼리)은 Python에 두어야 한다. JVM으로 이관하면 실질적 손실이 발생한다.**
+
+### 역할 분담 원칙
+
+| 구성 요소 | 권장 언어 | 이유 |
+|-----------|----------|------|
+| 문서 파싱 (Docling, pdfplumber 등) | **Python** | Java 생태계에 동급 파서 없음. 표/이미지 구조 인식 불가 |
+| 임베딩 생성 (sentence-transformers, KURE-v1 등) | **Python** | PyTorch 기반 — Java에서 직접 실행 불가 |
+| KG 엣지 탐색 / 벡터 유사도 검색 | **PostgreSQL** (SQL) | DB가 처리 — 어느 언어에서 호출해도 성능 동일 |
+| LLM 호출 (Anthropic, OpenAI API) | 어디서든 가능 | HTTP 호출이라 언어 무관 |
+| 인증 / 비즈니스 로직 / 오케스트레이션 | **Java/Spring Boot** | Spring Security, 기업 표준 프레임워크 강점 |
+
+### Java로 이관 시 발생하는 구체적 문제
+
+```
+문제 1: 임베딩 모델
+  한국어 특화 KURE-v1 (sentence-transformers + PyTorch)
+  → Java에서 직접 실행 불가
+  → 대안: OpenAI API로 대체 (비용 발생 + 한국어 검색 품질 하락)
+  → 대안: JNI/ONNX 변환 (복잡도 급증, 유지보수 어려움)
+
+문제 2: 문서 파싱
+  Docling — 표 구조, 레이아웃 인식, OCR 통합 파서
+  → Java에 동급 라이브러리 없음
+  → 대안: Apache PDFBox, iText (표 구조 인식 품질 현저히 낮음)
+
+문제 3: 불필요한 우회
+  Java → Python 서비스 HTTP 호출로 임베딩 처리
+  → 결국 Python 서비스가 다시 생기는 구조 (분리 의미 없음)
+```
+
+### 핵심: KG 탐색의 실질 연산은 DB가 담당
+
+```
+오해: "Graph RAG의 그래프 탐색 로직이 복잡하니 Python이 필요하다"
+
+실제: KG 엣지 탐색(Recursive CTE), pgvector 유사도 검색은
+      PostgreSQL이 처리 → Java에서 동일한 SQL을 호출해도 성능 동일
+
+Python이 필요한 진짜 이유:
+  임베딩 생성 (query embedding) — PyTorch 기반 모델 로드
+  문서 파싱 — Docling, pdfplumber
+  이 두 가지가 Python 전용이기 때문
+```
+
+### 권장 아키텍처 (마이크로서비스 분리)
+
+```
+[클라이언트]
+     ↓
+[Java/Spring Boot]  — 인증, 비즈니스 로직, 라우팅
+     ↓ HTTP
+[Python FastAPI]    — 파싱, 임베딩, RAG 파이프라인
+     ↓ SQL
+[PostgreSQL + pgvector]  — KG 저장, 벡터 검색, 그래프 탐색
+```
+
+이 구조에서 각 서비스는 자신이 가장 잘하는 역할에 집중한다.
+Java를 도입하더라도 Python FastAPI는 ML 전담 내부 서비스로 유지하는 것이 최선이다.
+
+---
+
 ## 📄 PDF 파서 선택 가이드
 
 Knowledge Graph RAG 시스템에서 문서 인제스트의 첫 단계는 PDF 파싱입니다. 파서 품질이 KG 추출 품질에 직접 영향을 줍니다.
