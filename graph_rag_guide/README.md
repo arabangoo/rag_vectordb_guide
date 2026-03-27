@@ -19,6 +19,8 @@
 - [Microsoft GraphRAG 상세](#-microsoft-graphrag-상세)
 - [LightRAG 상세](#-lightrag-상세)
 - [PostgreSQL로 Knowledge Graph 구현하기](#-postgresql로-knowledge-graph-구현하기)
+- [하이브리드 검색 — 벡터 + 키워드 통합](#-하이브리드-검색--벡터--키워드-통합)
+- [Graph RAG + Vector 검색 통합 방안](#-graph-rag--vector-검색-통합-방안)
 - [Python 통합 구현](#-python-통합-구현)
 - [한국어 임베딩 모델 선택 가이드](#-한국어-임베딩-모델-선택-가이드)
 - [언제 무엇을 선택할까](#-언제-무엇을-선택할까)
@@ -634,7 +636,12 @@ CREATE INDEX ON kg_chunk_entity (chunk_id);
 CREATE INDEX ON kg_chunk_entity (entity_id);
 CREATE INDEX ON chunk_relations (from_chunk);
 CREATE INDEX ON chunk_relations (to_chunk);
-CREATE INDEX ON chunks USING gin(to_tsvector('simple', content));  -- 전문 검색
+-- 전문 검색 인덱스
+-- 주의: 한국어 문서라면 'simple' 딕셔너리는 형태소 분석 없이 공백만 분리함
+-- 권장: pg_bigm 확장(바이그램 인덱스)을 함께 사용하면 한국어 부분 매칭 정확도 향상
+CREATE INDEX ON chunks USING gin(to_tsvector('simple', content));
+CREATE EXTENSION IF NOT EXISTS pg_bigm;
+CREATE INDEX idx_chunks_bigm ON chunks USING gin (content gin_bigm_ops);
 ```
 
 ### 엔티티·관계 추출 (인제스트 시)
@@ -866,6 +873,288 @@ ORDER BY
         WHEN 'graph'  THEN graph_distance + 1   -- 거리 멀수록 후순위
     END;
 ```
+
+---
+
+## 🔀 하이브리드 검색 — 벡터 + 키워드 통합
+
+순수 벡터(의미) 검색만으로는 **조항 번호나 전문 용어를 정확히 지정해서 검색하는 경우** 원하는 결과를 찾지 못할 수 있습니다. 하이브리드 검색은 벡터 검색과 키워드 검색을 병렬로 실행한 뒤 점수를 결합합니다.
+
+### 왜 필요한가
+
+| 질의 예시 | 벡터 검색 결과 | 키워드 검색 결과 |
+|----------|--------------|----------------|
+| "3.2절 인증 프로세스" | 인증 관련 청크들이 유사도 순으로 반환 | "3.2절"이 정확히 포함된 청크 반환 |
+| "납입면제 조건" | 의미상 유사한 다른 조항이 먼저 나올 수 있음 | 정확히 "납입면제" 단어가 포함된 청크 반환 |
+| 전문 용어 직접 검색 | 학습 데이터 품질에 의존 | 형태소 분석 후 정확 매칭 |
+
+두 채널의 결과를 합치면 **의미 검색의 유연함**과 **키워드 검색의 정확성**을 모두 얻을 수 있습니다.
+
+### 사전 조건: 한국어 tsvector 품질 개선
+
+`to_tsvector('simple', content)`는 공백 기준으로만 토큰을 분리합니다. 한국어는 조사·어미 변화가 심해서 "납입면제가", "납입면제를", "납입면제의"가 모두 다른 토큰으로 저장되어, "납입면제"로 검색하면 어느 것도 매칭되지 않습니다.
+
+**pg_bigm** 확장은 모든 텍스트를 2글자(바이그램) 단위로 분해해서 저장하기 때문에 형태소 분석 없이도 한국어 부분 문자열 매칭이 정확하게 작동합니다.
+
+```sql
+-- pg_bigm 설치 (PostgreSQL 슈퍼유저 권한 필요)
+CREATE EXTENSION IF NOT EXISTS pg_bigm;
+
+-- 바이그램 인덱스 생성
+CREATE INDEX idx_chunks_bigm ON chunks USING gin (content gin_bigm_ops);
+
+-- 검색 시 사용
+SELECT id, content FROM chunks
+WHERE content LIKE '%납입면제%'   -- pg_bigm이 자동으로 인덱스 활용
+ORDER BY similarity(content, '납입면제') DESC
+LIMIT 10;
+```
+
+### 점수 결합 방식: 정규화 가중 합산
+
+> **중요:** 벡터 검색과 키워드 검색처럼 **성격이 다른 이종 채널**을 결합할 때는 RRF(Reciprocal Rank Fusion)보다 **정규화된 점수의 가중 합산**이 더 적합합니다.
+>
+> RRF는 순위 정보만 사용해서 점수 크기를 버립니다. 벡터 검색 1–5위가 모두 유사도 0.97–0.98처럼 밀집해 있다면 순위 차이가 실제로는 무의미한데, RRF는 이를 구분할 수 없습니다. RRF는 **동일 모달리티** 내 여러 검색 변형(예: 여러 임베딩 모델 앙상블, 여러 키워드 설정 결합)에 적합합니다.
+
+```
+final_score = α × norm(vector_score) + (1-α) × norm(keyword_score)
+
+norm(x) : 해당 검색 결과 내 min-max 정규화 → [0, 1] 범위로 통일
+α       : 벡터 검색 가중치 (기본값 0.7, 질의 유형에 따라 동적 조정)
+```
+
+#### α 동적 조정
+
+| 질의 유형 | α 권장값 | 이유 |
+|-----------|:-------:|------|
+| 일반 의미 질의 ("인증 프로세스 설명") | 0.7 | 의미 검색이 더 적합 |
+| 섹션 번호 직접 지정 ("3.2절") | 0.3 | 키워드 검색이 더 정확 |
+| 짧은 전문 용어 ("납입면제") | 0.4 | 키워드 비중 상향 |
+
+### 구현 코드
+
+```python
+import re
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+def _get_alpha(query: str) -> float:
+    """질의 유형 감지 → 벡터/키워드 가중치(α) 결정"""
+    # 섹션/조항 번호 패턴: "3.2절", "제5조" 등
+    if re.search(r'\d+\.\d+절|제\s*\d+\s*[조항]', query):
+        return 0.3
+    # 단어 수 3개 이하 — 전문 용어 직접 질의로 판단
+    if len(query.split()) <= 3:
+        return 0.4
+    return 0.7  # 기본: 의미 검색 우선
+
+async def keyword_search(
+    db: AsyncSession,
+    query: str,
+    top_k: int = 10,
+) -> list[dict]:
+    """tsvector 키워드 검색 — 조항 번호·전문 용어 정확 매칭에 강점"""
+    sql = """
+        SELECT
+            id,
+            content,
+            section_id,
+            title,
+            ts_rank(to_tsvector('simple', content),
+                    plainto_tsquery('simple', :query)) AS keyword_score
+        FROM chunks
+        WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', :query)
+        ORDER BY keyword_score DESC
+        LIMIT :top_k
+    """
+    result = await db.execute(text(sql), {"query": query, "top_k": top_k})
+    return [dict(row._mapping) for row in result.fetchall()]
+
+def score_merge(
+    vector_chunks: list[dict],
+    keyword_chunks: list[dict],
+    alpha: float = 0.7,
+    top_n: int = 5,
+) -> list[dict]:
+    """정규화 점수 가중 합산으로 두 검색 결과 통합"""
+
+    def normalize(chunks: list[dict], key: str) -> dict[str, float]:
+        scores = [c[key] for c in chunks if c.get(key) is not None]
+        if not scores:
+            return {}
+        min_s, max_s = min(scores), max(scores)
+        denom = max_s - min_s or 1.0
+        return {c["id"]: (c[key] - min_s) / denom for c in chunks if c.get(key) is not None}
+
+    v_norm = normalize(vector_chunks, "similarity")
+    k_norm = normalize(keyword_chunks, "keyword_score")
+
+    # 두 결과의 합집합
+    all_ids = set(v_norm) | set(k_norm)
+    chunk_map = {c["id"]: c for c in vector_chunks + keyword_chunks}
+
+    merged = []
+    for cid in all_ids:
+        score = alpha * v_norm.get(cid, 0.0) + (1 - alpha) * k_norm.get(cid, 0.0)
+        chunk = dict(chunk_map[cid])
+        chunk["hybrid_score"] = score
+        merged.append((score, chunk))
+
+    merged.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in merged[:top_n]]
+```
+
+### 하이브리드 검색 흐름
+
+```
+[사용자 질의]
+     │
+     │  _get_alpha(query) → α 결정
+     │
+     ├──────────────────────────────────┐
+     ▼                                  ▼
+[벡터 검색]                         [키워드 검색]
+pgvector 코사인 유사도 top-K        tsvector / pg_bigm top-K
+코사인 유사도 점수 (0–1)            ts_rank 점수 (0–1, 정규화)
+     │                                  │
+     └──────────┬───────────────────────┘
+                ▼
+   [정규화 점수 가중 합산]
+   α × norm(vector) + (1-α) × norm(keyword)
+                │
+                ▼
+        [상위 N개 청크 선택]
+                │
+                ▼
+        [Graph RAG 확장]
+                │
+                ▼
+          [LLM 답변 생성]
+```
+
+---
+
+## 🔗 Graph RAG + Vector 검색 통합 방안
+
+현재 대부분의 Graph RAG 구현은 벡터 검색과 그래프 확장을 **독립 파이프라인**으로 처리합니다. 두 채널을 더 긴밀하게 연동하면 검색 품질을 한 단계 더 높일 수 있습니다.
+
+### 현재 구조의 문제
+
+```
+벡터 검색 → [seed 청크 5개, 신뢰도 0.6–0.99 혼재]
+                   │
+                   ▼  ← seed 신뢰도와 무관하게 동일하게 처리
+Graph 확장 → [참조 청크 3개, 점수 없이 단순 추가]
+                   │
+                   ▼
+         단순 합산 8개 → LLM
+```
+
+**문제점:**
+- 벡터 유사도 0.62처럼 신뢰도 낮은 seed의 참조 청크도 0.98 seed와 동일한 가중치로 포함됨
+- 그래프에서 수십 개 청크가 참조하는 허브 노드(정의 조항 등)가 벡터 검색에서 낮은 순위이면 무시됨
+- Graph 확장 결과가 실제 질문과 관련 있는지 검증하지 않음
+
+### 방향 A: 점수 기반 선택적 Graph 확장 (즉시 적용 가능)
+
+벡터 점수가 높은 seed 청크에서만 graph expand를 수행합니다. 신뢰도 낮은 청크의 참조 조항은 노이즈가 될 수 있으므로 제외합니다.
+
+```python
+GRAPH_SCORE_THRESHOLD = 0.75  # 코사인 유사도 0.75 이상만 seed로 사용
+
+async def expand_with_graph_selective(
+    initial_chunks: list[dict],
+    db: AsyncSession,
+    max_hops: int = 2,
+    expand_limit: int = 5,
+    score_threshold: float = GRAPH_SCORE_THRESHOLD,
+) -> list[dict]:
+    """점수 기반 선택적 Graph 확장"""
+    # 신뢰도 높은 seed만 추출
+    reliable_seeds = [
+        c["id"] for c in initial_chunks
+        if c.get("similarity", 0) >= score_threshold
+    ]
+
+    # 신뢰도 기준을 만족하는 seed가 없으면 상위 3개로 fallback
+    if not reliable_seeds:
+        reliable_seeds = [c["id"] for c in initial_chunks[:3]]
+
+    return await expand_with_knowledge_graph(reliable_seeds, db, max_hops, expand_limit)
+```
+
+### 방향 B: 그래프 중심성을 검색 점수에 반영 (중기 적용)
+
+허브 노드(많은 청크가 참조하는 정의 조항 등)는 **in-degree(참조 받는 횟수)**가 높습니다. 이런 청크는 벡터 검색 점수가 낮더라도 답변의 맥락 이해에 필수적입니다. in-degree를 벡터 점수에 가산해 허브 노드가 검색 결과 상위에 오도록 합니다.
+
+```sql
+-- 사전에 각 청크의 in-degree 계산
+SELECT to_chunk AS chunk_id, COUNT(*) AS in_degree
+FROM chunk_relations
+GROUP BY to_chunk;
+```
+
+```python
+GRAPH_BOOST = 0.05  # 중심성 보정 계수
+
+def apply_centrality_boost(
+    chunks: list[dict],
+    in_degree_map: dict[int, int],  # {chunk_id: in_degree}
+) -> list[dict]:
+    """그래프 중심성(in-degree)을 벡터 점수에 보정 적용"""
+    for chunk in chunks:
+        in_degree = in_degree_map.get(chunk["id"], 0)
+        # in_degree가 10 이상이면 최대 보정치(0.05) 적용
+        boost = GRAPH_BOOST * min(in_degree / 10, 1.0)
+        chunk["score_boosted"] = min(chunk.get("similarity", 0) + boost, 1.0)
+    return sorted(chunks, key=lambda x: x["score_boosted"], reverse=True)
+```
+
+### 방향 C: Graph 확장 결과 유사도 재검증 (중기 적용)
+
+Graph expand로 가져온 청크가 실제로 질문과 관련 있는지 질문 벡터와의 유사도를 재계산해서 관련성 낮은 청크를 제외합니다.
+
+```python
+GRAPH_RELEVANCE_THRESHOLD = 0.60
+
+async def filter_graph_chunks_by_relevance(
+    graph_chunks: list[dict],
+    query_embedding: list[float],
+    db: AsyncSession,
+    threshold: float = GRAPH_RELEVANCE_THRESHOLD,
+) -> list[dict]:
+    """Graph 확장 결과를 질문 벡터와의 유사도로 재검증"""
+    if not graph_chunks:
+        return []
+
+    chunk_ids = [c["id"] for c in graph_chunks]
+
+    # DB에서 임베딩 가져와 유사도 재계산
+    sql = """
+        SELECT id,
+               1 - (embedding <=> :query_emb::vector) AS relevance
+        FROM chunks
+        WHERE id = ANY(:ids)
+          AND 1 - (embedding <=> :query_emb::vector) >= :threshold
+    """
+    result = await db.execute(text(sql), {
+        "query_emb": query_embedding,
+        "ids": chunk_ids,
+        "threshold": threshold,
+    })
+    relevant_ids = {row.id for row in result.fetchall()}
+
+    return [c for c in graph_chunks if c["id"] in relevant_ids]
+```
+
+### 단계별 적용 순서
+
+| 단계 | 방향 | 난이도 | 언제 |
+|------|------|--------|------|
+| 1단계 | A: 점수 기반 선택적 확장 | 낮음 — 코드 몇 줄 | 즉시 |
+| 2단계 | B: 그래프 중심성 보정 | 중간 — in-degree 사전 계산 필요 | A 효과 확인 후 |
+| 3단계 | C: 확장 결과 재검증 | 중간 — 추가 DB 조회 발생 | B 효과 확인 후 |
 
 ---
 
@@ -1401,7 +1690,7 @@ Graph RAG에서는 거기서 한 걸음 더 나아가 **청크 = KG 노드** 여
 | 법령·약관·계약서 | 장/조/항/호 명확 | 헤더/조항 경계 | `제N조`, `#` 헤더 |
 | 기술 문서·API 레퍼런스 | 섹션 구조 명확 | 헤더 경계 | `##`, `###` 헤더 |
 | 논문·보고서 | Abstract/Introduction/방법 구조 | 헤더 + 단락 | `#` 헤더 + 빈 줄 |
-| 뉴스·블로그 | 비구조적 자유 서술 | 고정 크기 + 오버랩 | 500~1000자, 오버랩 10~20% |
+| 뉴스·블로그 | 비구조적 자유 서술 | 고정 크기 + 오버랩 | 500–1000자, 오버랩 10–20% |
 | 대화·Q&A | 질문-답변 쌍 | 대화 쌍 단위 | Q/A 경계 |
 
 ### 구조화 문서를 위한 2단계 청킹 패턴
@@ -1458,8 +1747,8 @@ Markdown 청크                    KG 노드
 | 청킹 유형 | 오버랩 필요성 | 권장 설정 |
 |----------|-------------|----------|
 | 헤더/구조 경계 기반 1차 분할 | 불필요 (경계가 명확) | 오버랩 0 |
-| 슬라이딩 윈도우 2차 분할 | 필요 (절단 보완) | 전체 크기의 10~15% |
-| 고정 크기 분할 | 필요 | 전체 크기의 15~20% |
+| 슬라이딩 윈도우 2차 분할 | 필요 (절단 보완) | 전체 크기의 10–15% |
+| 고정 크기 분할 | 필요 | 전체 크기의 15–20% |
 
 > **핵심 원칙**: 헤더/경계 기반으로 1차 분할한 청크에는 오버랩이 필요 없다.
 > 오버랩은 "의미 단위를 모르고 기계적으로 자를 때" 경계 손실을 보완하는 장치다.
