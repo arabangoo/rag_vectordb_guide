@@ -21,12 +21,15 @@
 - [PostgreSQL로 Knowledge Graph 구현하기](#-postgresql로-knowledge-graph-구현하기)
 - [하이브리드 검색 — 벡터 + 키워드 통합](#-하이브리드-검색--벡터--키워드-통합)
 - [Graph RAG + Vector 검색 통합 방안](#-graph-rag--vector-검색-통합-방안)
+- [LLM 질문 전처리 — 구어체를 도메인 키워드로 변환](#-llm-질문-전처리--구어체를-도메인-키워드로-변환)
+- [프롬프트 보강 + 코드 레벨 가드레일](#-프롬프트-보강--코드-레벨-가드레일)
 - [Python 통합 구현](#-python-통합-구현)
 - [한국어 임베딩 모델 선택 가이드](#-한국어-임베딩-모델-선택-가이드)
 - [언제 무엇을 선택할까](#-언제-무엇을-선택할까)
 - [언어 선택 — Python vs JVM](#-언어-선택--python-vs-jvm-javakotlin)
 - [청킹 전략 — Graph RAG의 필수 요건](#️-청킹-전략--graph-rag의-필수-요건)
 - [PDF 파서 선택 가이드](#-pdf-파서-선택-가이드)
+- [Agentic RAG — 하네스 엔지니어링](#-agentic-rag--하네스-엔지니어링)
 - [트러블슈팅](#-트러블슈팅)
 - [참고 자료](#-참고-자료)
 
@@ -885,14 +888,14 @@ ORDER BY
 | 질의 예시 | 벡터 검색 결과 | 키워드 검색 결과 |
 |----------|--------------|----------------|
 | "3.2절 인증 프로세스" | 인증 관련 청크들이 유사도 순으로 반환 | "3.2절"이 정확히 포함된 청크 반환 |
-| "납입면제 조건" | 의미상 유사한 다른 조항이 먼저 나올 수 있음 | 정확히 "납입면제" 단어가 포함된 청크 반환 |
+| "직렬화 처리 방식" | 의미상 유사한 다른 항목이 먼저 나올 수 있음 | 정확히 "직렬화" 단어가 포함된 청크 반환 |
 | 전문 용어 직접 검색 | 학습 데이터 품질에 의존 | 형태소 분석 후 정확 매칭 |
 
 두 채널의 결과를 합치면 **의미 검색의 유연함**과 **키워드 검색의 정확성**을 모두 얻을 수 있습니다.
 
 ### 사전 조건: 한국어 tsvector 품질 개선
 
-`to_tsvector('simple', content)`는 공백 기준으로만 토큰을 분리합니다. 한국어는 조사·어미 변화가 심해서 "납입면제가", "납입면제를", "납입면제의"가 모두 다른 토큰으로 저장되어, "납입면제"로 검색하면 어느 것도 매칭되지 않습니다.
+`to_tsvector('simple', content)`는 공백 기준으로만 토큰을 분리합니다. 한국어는 조사·어미 변화가 심해서 "직렬화가", "직렬화를", "직렬화의"가 모두 다른 토큰으로 저장되어, "직렬화"로 검색하면 어느 것도 매칭되지 않습니다.
 
 **pg_bigm** 확장은 모든 텍스트를 2글자(바이그램) 단위로 분해해서 저장하기 때문에 형태소 분석 없이도 한국어 부분 문자열 매칭이 정확하게 작동합니다.
 
@@ -905,8 +908,8 @@ CREATE INDEX idx_chunks_bigm ON chunks USING gin (content gin_bigm_ops);
 
 -- 검색 시 사용
 SELECT id, content FROM chunks
-WHERE content LIKE '%납입면제%'   -- pg_bigm이 자동으로 인덱스 활용
-ORDER BY similarity(content, '납입면제') DESC
+WHERE content LIKE '%직렬화%'   -- pg_bigm이 자동으로 인덱스 활용
+ORDER BY similarity(content, '직렬화') DESC
 LIMIT 10;
 ```
 
@@ -929,7 +932,7 @@ norm(x) : 해당 검색 결과 내 min-max 정규화 → [0, 1] 범위로 통일
 |-----------|:-------:|------|
 | 일반 의미 질의 ("인증 프로세스 설명") | 0.7 | 의미 검색이 더 적합 |
 | 섹션 번호 직접 지정 ("3.2절") | 0.3 | 키워드 검색이 더 정확 |
-| 짧은 전문 용어 ("납입면제") | 0.4 | 키워드 비중 상향 |
+| 짧은 전문 용어 ("직렬화 처리") | 0.4 | 키워드 비중 상향 |
 
 ### 구현 코드
 
@@ -1155,6 +1158,197 @@ async def filter_graph_chunks_by_relevance(
 | 1단계 | A: 점수 기반 선택적 확장 | 낮음 — 코드 몇 줄 | 즉시 |
 | 2단계 | B: 그래프 중심성 보정 | 중간 — in-degree 사전 계산 필요 | A 효과 확인 후 |
 | 3단계 | C: 확장 결과 재검증 | 중간 — 추가 DB 조회 발생 | B 효과 확인 후 |
+
+---
+
+## 🧹 LLM 질문 전처리 — 구어체를 도메인 키워드로 변환
+
+임베딩 모델은 같은 의미라도 표현 방식이 다르면 벡터 공간에서 거리가 벌어질 수 있습니다. 특히 **일상 구어체**와 **전문 문서의 기술·법률 문어체** 사이에서 이 현상이 두드러집니다.
+
+```
+사용자 질문: "왜 연결이 갑자기 끊겨?"
+문서 텍스트: "세션이 설정된 타임아웃 임계값을 초과하면 자동으로 종료됩니다."
+
+→ "끊겨"와 "종료됩니다"는 의미상 동일하지만
+  임베딩 벡터 공간에서는 완전히 같은 위치에 있지 않음
+→ "갑자기 끊겨" → 도메인 언어로는 "세션 타임아웃", "연결 종료 조건" 등
+```
+
+### 해결 방법: 경량 LLM으로 임베딩 직전 키워드 변환
+
+벡터 검색 직전 단계에 **경량 LLM**을 두어 구어체 질문을 도메인 키워드로 변환합니다.
+
+```
+[사용자 질문 (구어체)]
+        ↓
+  경량 LLM (예: Claude Haiku, GPT-4o mini)
+  구어체 → 도메인 키워드 변환
+        ↓
+  변환된 키워드 문자열
+        ↓
+  임베딩 모델 (KURE-v1 등)
+        ↓
+  벡터 검색 → 더 높은 유사도로 관련 청크 탐색
+```
+
+> **경량 모델을 쓰는 이유**: 키워드 변환은 단순 작업이라 고성능 모델이 필요 없습니다. 속도와 비용 최적화를 위해 최소 모델을 사용합니다. 변환 실패 시 원본 질문을 그대로 임베딩하는 fallback으로 서비스 중단을 방지합니다.
+
+### 전처리 프롬프트 예시
+
+```python
+QUERY_ANALYSIS_PROMPT = """당신은 전문 문서 검색 도우미입니다.
+사용자의 구어체 질문을 분석하여 전문 문서에서 검색에 적합한 키워드 목록을 JSON으로 반환하세요.
+
+규칙:
+- keywords 배열에 2~5개의 핵심 전문 용어를 담으세요
+- 구어체 표현은 해당 도메인의 공식 용어로 변환하세요
+- JSON만 반환하세요, 다른 설명 없이
+
+{{"keywords": ["키워드1", "키워드2", "키워드3"]}}
+
+사용자 질문: {user_question}"""
+```
+
+```python
+# 변환 예시 (기술 문서 도메인)
+"왜 연결이 끊겨?"        → ["세션 타임아웃", "연결 종료 조건", "소켓 연결 해제"]
+"이거 다른 버전에서도 돼?" → ["하위 호환성", "버전 지원 범위", "API 호환성"]
+"요청 실패하면 어떻게 해?" → ["오류 처리", "예외 핸들링", "재시도 정책"]
+
+# 변환 예시 (법령·규정 도메인)
+"위반하면 어떻게 돼?"    → ["위반 시 제재", "과태료 부과 기준", "행정처분"]
+"예외가 있어?"           → ["적용 제외 대상", "면제 조건", "예외 규정"]
+"언제부터 적용돼?"       → ["시행일", "적용 범위", "경과 규정"]
+```
+
+### 구현
+
+```python
+import anthropic
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+QUERY_ANALYSIS_PROMPT = """..."""  # 위 프롬프트
+
+async def analyze_query(question: str) -> dict:
+    """구어체 질문 → 도메인 키워드 변환 (경량 LLM 활용)"""
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",  # 속도/비용 최적화
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": QUERY_ANALYSIS_PROMPT.format(user_question=question)
+            }]
+        )
+        return json.loads(response.content[0].text.strip())
+    except Exception as e:
+        logger.warning(f"질문 전처리 실패, 원본 사용: {e}")
+        return {"keywords": [question]}   # fallback: 원본 질문 그대로
+
+
+# run_query() 에서 사용
+async def run_query(question: str, db, top_k: int = 5):
+    # 1. LLM으로 키워드 변환
+    analysis = await analyze_query(question)
+    keywords_text = " ".join(analysis.get("keywords", [])) or question
+
+    # 2. 변환된 키워드를 임베딩 입력으로 사용
+    query_vector = embed_query(keywords_text)
+
+    # 3. 이후 벡터 검색 → Graph RAG 확장 → LLM 답변 생성
+    ...
+```
+
+### 적용 효과
+
+| 질문 유형 | 전처리 없을 때 | 전처리 후 |
+|----------|-------------|---------|
+| 구어체 상황 설명 ("왜 연결이 끊겨?") | 관련 문서 낮은 순위 | 세션 타임아웃·연결 종료 조항 상위 탐색 |
+| 줄임말·비공식 표현 ("이거 다른 버전에서도 돼?") | 불일치 | 하위 호환성·버전 지원 범위 정확 탐색 |
+| 도메인 정규 용어 ("세션 타임아웃 설정") | 이미 잘 동작 | 동일 또는 미세 개선 |
+
+> **추가 레이턴시**: 경량 모델 API 호출 기준 약 100–200ms. 전체 RAG 응답 대비 미미한 수준.
+
+---
+
+## 🛡 프롬프트 보강 + 코드 레벨 가드레일
+
+LLM에게 "반드시 X를 포함하라"고 지시해도 컨텍스트가 길거나 질문이 단순할 때 LLM이 해당 지시를 **확률적으로 누락**할 수 있습니다. 신뢰성이 중요한 도메인(기술 문서, 법령, 규정 등)에서는 LLM에게 맡기는 대신 **코드 레벨에서 직접 판단하고 삽입**하는 방식이 필요합니다.
+
+### 시스템 프롬프트 설계 원칙
+
+```python
+SYSTEM_PROMPT = """당신은 [도메인] 전문 문서 상담사입니다.
+주어진 컨텍스트(문서 조항)만을 근거로 정확하게 답변합니다.
+
+규칙:
+1. 컨텍스트에 있는 내용만 근거로 사용합니다. 외부 배경지식 혼용 금지.
+2. 답변 마지막에 근거 출처를 반드시 명시합니다.
+   예) [근거: 3.2절(오류 코드 목록), 부록A(용어 정의)]
+3. 수치·조건·기간은 원문을 그대로 인용합니다.
+4. 버전 A와 버전 B의 동작이 다를 경우 각각 구분하여 명시합니다.
+5. {safety_notice}컨텍스트에 예외·제한·금지 조항이 포함된 경우
+   답변에 반드시 해당 내용과 함께 주의 표기를 포함합니다.
+6. 컨텍스트만으로 확인이 어려운 경우 "해당 문서에서 확인이 어렵습니다"로 안내합니다.
+7. 답변 마지막에 사용자가 추가로 확인할 만한 연관 질문 3개를 제안합니다.
+"""
+```
+
+> **규칙 5**: `{safety_notice}` 자리는 코드가 채웁니다 — "예외·제한 조항이 검색 결과에 포함되어 있습니다. 반드시 포함하세요." 또는 "예외·제한 조항이 검색 결과에 없습니다. 주의 경고를 삽입하세요." 중 하나. LLM이 판단하는 것이 아닙니다.
+
+### 코드 레벨 가드레일 구현 패턴
+
+LLM이 "예외·제한 조항을 포함하세요"라는 지시를 신뢰성 있게 따르려면, 컨텍스트에 해당 조항이 실제로 있는지를 **코드가 먼저 확인**해야 합니다.
+
+```python
+def _check_safety_clause_in_chunks(chunks: list[dict], keywords: list[str]) -> bool:
+    """컨텍스트 청크에 예외·제한 키워드 포함 여부 확인"""
+    return any(
+        any(kw in c.get("content", "") for kw in keywords)
+        for c in chunks
+    )
+
+# 도메인별 키워드 예시 (기술 문서)
+RESTRICTION_KEYWORDS = [
+    "지원하지 않습니다",
+    "적용되지 않는 경우",
+    "제한 사항",
+    "예외 조건",
+    "사용 불가",
+]
+
+# LLM 호출 직전
+has_restriction = _check_safety_clause_in_chunks(all_chunks, RESTRICTION_KEYWORDS)
+
+if has_restriction:
+    # 컨텍스트에 예외·제한 조항이 있음 → LLM이 참조해서 직접 답변 가능
+    safety_notice = "아래 컨텍스트에 예외·제한 조항이 포함되어 있습니다. 반드시 해당 내용을 답변에 포함하세요.\n\n"
+else:
+    # 컨텍스트에 없음 → 직접 경고 삽입 강제
+    safety_notice = (
+        "\n\n[⚠️ 제한 사항 주의]\n"
+        "이번 검색 결과에 예외·제한 조항이 포함되지 않았습니다.\n"
+        "실제 조항에 따라 예외 상황이 존재할 수 있으므로 원문을 반드시 확인하세요."
+    )
+
+answer = call_llm(query, context, safety_notice=safety_notice)
+```
+
+### LLM에게 맡기는 것 vs 코드가 강제하는 것
+
+| 항목 | LLM에게 맡기기 | 코드가 강제하기 |
+|------|--------------|--------------|
+| 답변 문체·구성 | ✅ 적합 | 과도한 제어 |
+| 출처 명시 | ✅ 프롬프트 지시로 충분 | 필요 시 후처리 검증 |
+| 예외·제한 경고 | ❌ 확률적 누락 위험 | ✅ 컨텍스트 스캔 후 강제 삽입 |
+| 개인정보·민감정보 필터링 | ❌ 신뢰 불가 | ✅ 정규식·패턴 매칭으로 강제 |
+| 연관 질문 생성 | ✅ LLM이 잘함 | 불필요 |
+
+> **원칙**: 확률적으로 허용 가능한 오류는 LLM에게 맡기고, 절대 누락되면 안 되는 항목은 코드가 보장합니다.
 
 ---
 
@@ -1731,8 +1925,8 @@ def chunk_structured_document(markdown: str) -> list[str]:
 ```
 Markdown 청크                    KG 노드
 ─────────────────               ──────────────────
-## 제3조(보험금의 지급)    →    node_clause (article_no="제3조")
-① 회사는 피보험자가...              ↕ has_clause 엣지
+## 제3조(손해배상의 범위)  →    node_clause (article_no="제3조")
+① 당사자가 합의한 경우...           ↕ has_clause 엣지
 ② 다음 각 호의 경우...              ↕
                                 node_section (주계약/특약)
                                     ↕ belongs_to 엣지
@@ -1847,6 +2041,181 @@ docker run --rm \
 
 ---
 
+## 🤖 Agentic RAG — 하네스 엔지니어링
+
+Graph RAG 파이프라인이 안정화되면 그 다음 단계는 **사람이 직접 하던 모든 작업을 AI 에이전트가 자율적으로 수행**하게 만드는 것입니다. 이 단계를 **Agentic RAG**라 하고, 에이전트가 안전하고 예측 가능하게 작동하도록 감싸는 실행 환경 설계를 **하네스 엔지니어링(Harness Engineering)** 이라 합니다.
+
+### 현재 구조 vs Agentic RAG 목표
+
+```
+[현재 — 사람 주도]
+  사람이 문서 다운로드
+      ↓ 수동
+  사람이 /ingest 업로드
+      ↓ 수동
+  인제스트 결과 눈으로 확인
+      ↓ 수동
+  샘플 질문 입력 → 답변 품질 직접 평가
+
+[목표 — 에이전트 주도]
+  Document Agent  → 신규/개정 문서 자동 감지 + 다운로드
+      ↓ 자동
+  Ingest Agent    → /ingest 자동 호출 + KG 엣지 생성
+      ↓ 자동
+  Validation Agent → 품질 자동 검증 (청크 수, KG 밀도, 답변 품질)
+      ↓ 자동
+  Report Agent    → 통과 시 완료 알림 / 이상 감지 시 담당자 알림
+```
+
+---
+
+### 9-1. 에이전트 구조
+
+#### Document Agent
+
+웹 자동화 도구(Playwright 등)를 활용해 소스 사이트를 주기적으로 순회하며 신규·개정 문서를 감지하고 다운로드합니다.
+
+```python
+# Document Agent 핵심 로직 (추상화)
+class DocumentAgent:
+    async def run(self):
+        known_docs = self.load_known_documents()         # 이미 처리한 문서 목록
+        found_docs = await self.crawl_source()           # 소스에서 현재 문서 목록 수집
+        new_docs   = [d for d in found_docs if d not in known_docs]
+
+        for doc in new_docs:
+            path = await self.download(doc)              # 다운로드
+            await self.trigger_ingest(path, doc.meta)   # Ingest Agent 트리거
+```
+
+#### Ingest Agent
+
+Document Agent가 넘겨준 파일을 받아 `/ingest` API를 호출하고, 완료 후 결과를 Validation Agent에 전달합니다.
+
+```python
+class IngestAgent:
+    async def run(self, file_path: str, metadata: dict):
+        result = await self.call_ingest_api(file_path, metadata)
+        # result = {"chunks_new": 158, "edges_new": 103, "alerts": []}
+
+        if result.get("alerts"):
+            await self.notify_alerts(result["alerts"])  # 이상 패턴 알림
+
+        await self.trigger_validation(result)           # Validation Agent 트리거
+```
+
+#### Validation Agent
+
+인제스트 결과와 실제 응답 품질을 자동으로 검증합니다. **현재 수동으로 하는 품질 확인 기준이 그대로 에이전트의 자동 판단 로직**이 됩니다.
+
+```python
+class ValidationAgent:
+    CHECKS = {
+        "chunk_count_ratio": (0.8, 1.2),     # 기대 청크 수 대비 ±20% 이내
+        "edge_density_min": 0.5,              # 청크당 평균 엣지 수 최솟값
+        "answer_faithfulness_min": 0.85,      # LLM-as-judge 답변 충실도
+        "restriction_coverage": True,          # 예외·제한 경고 포함 여부
+    }
+
+    async def run(self, ingest_result: dict):
+        # 1. 청크·KG 통계 검증
+        stats_ok = self.check_stats(ingest_result)
+
+        # 2. 샘플 질문 자동 생성 → /query 호출 → 응답 품질 평가
+        sample_qa = await self.generate_sample_questions(ingest_result["product_id"])
+        quality_ok = await self.evaluate_answers(sample_qa)
+
+        if stats_ok and quality_ok:
+            await self.report_success()
+        else:
+            await self.report_failure_and_retry()
+```
+
+#### LLM-as-judge (자동 품질 평가)
+
+Validation Agent가 답변 품질을 자동으로 채점하는 핵심 메커니즘입니다.
+
+```python
+LLM_JUDGE_PROMPT = """아래 질문과 답변, 참고 컨텍스트를 보고 답변 품질을 평가하세요.
+
+질문: {question}
+컨텍스트: {context}
+답변: {answer}
+
+다음 기준으로 각 항목을 0~1 점수로 평가하고 JSON으로 반환하세요:
+- faithfulness: 답변이 컨텍스트에 근거한 정도 (외부 지식 혼용 없이)
+- completeness: 질문의 핵심을 충분히 다룬 정도
+- safety_coverage: 예외·제한 조항을 언급한 정도
+
+{{"faithfulness": 0.95, "completeness": 0.88, "safety_coverage": 0.90}}
+"""
+
+async def evaluate_answer(question, context, answer) -> dict:
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": LLM_JUDGE_PROMPT.format(
+            question=question, context=context, answer=answer
+        )}]
+    )
+    return json.loads(response.content[0].text)
+```
+
+---
+
+### 9-2. 하네스 엔지니어링이 필요한 이유
+
+에이전트는 실패할 수 있습니다. 하네스는 에이전트가 **안전하고 예측 가능하게 실패**하도록 감싸는 구조입니다.
+
+```
+[에이전트 없을 때의 실패]
+  사람이 잘못 업로드 → 즉시 인식 → 수동 수정
+
+[에이전트의 실패 — 하네스 없을 때]
+  Document Agent가 잘못된 버전 다운로드
+      → Ingest Agent가 자동 적재
+      → 잘못된 데이터로 운영
+      → 며칠 후 사용자 민원으로 발견
+
+[에이전트의 실패 — 하네스 있을 때]
+  Document Agent가 잘못된 버전 다운로드
+      → Validation Agent: 청크 수 이상 감지 (기대 대비 60%)
+      → 자동 롤백 + 담당자 알림
+      → 다음 실행에서 재시도
+```
+
+#### 하네스의 핵심 구성 요소
+
+| 구성 요소 | 설명 |
+|----------|------|
+| **입출력 스키마** | 각 에이전트가 주고받는 데이터 형식 고정 (JSON Schema) |
+| **rollback 전략** | 인제스트 실패 시 부분 데이터 자동 정리 후 재시도 |
+| **pass/fail 기준 수치화** | 청크 수 기대치 ±20%, faithfulness ≥ 0.85 등 |
+| **오케스트레이션** | Document → Ingest → Validation → Report 순서와 의존성 관리 |
+| **감사 로그** | 에이전트가 수행한 모든 작업 기록 (규제·컴플라이언스 대응) |
+| **재시도·타임아웃 정책** | 에이전트별 최대 재시도 횟수, 단계별 타임아웃 |
+
+---
+
+### 9-3. 현재 RAG 구현과의 연결
+
+지금 구축하는 RAG 파이프라인의 각 API 엔드포인트와 품질 기준이 나중에 **에이전트의 도구**와 **Validation Agent의 자동 검증 기준**이 됩니다.
+
+```
+[현재 구현한 것]          [나중에 에이전트가 사용할 도구]
+─────────────────         ──────────────────────────────
+POST /ingest           →  Ingest Agent의 핵심 도구
+POST /query            →  Validation Agent의 품질 검증 도구
+GET  /kg-graph         →  Validation Agent의 KG 통계 확인 도구
+analyze_query()        →  구어체 처리 — 에이전트도 동일하게 활용
+_check_safety_clause() →  Validation Agent의 안전 검증 기준
+```
+
+> **핵심 통찰**: Standard RAG → Graph RAG로 발전할 때처럼, Graph RAG → Agentic RAG로 발전할 때도 기존 코드를 버리지 않습니다. 잘 만든 API와 명확한 품질 기준이 에이전트화의 기반이 됩니다.
+
+---
+
 ## 🔧 트러블슈팅
 
 ### pgvector 관련
@@ -1938,8 +2307,12 @@ EXPLAIN ANALYZE WITH RECURSIVE ...
 CREATE INDEX ON kg_relations (from_entity, to_entity);
 CREATE INDEX ON kg_chunk_entity (entity_id, chunk_id);
 
--- max_hops를 너무 크게 설정하지 말 것 (3 이상은 성능 급락)
--- 대부분의 경우 max_hops=2면 충분
+-- max_hops 권장값: 2~3
+-- 2-hop: 빠르고 안정적, 대부분의 직접 참조 커버
+-- 3-hop: 연쇄 참조가 깊은 구조화 문서(법령·약관 등)에서 유효
+--        단, 방향 A(점수 기반 seed 필터링, score >= 0.75)와 함께 써야
+--        무관 청크 유입을 막을 수 있음
+-- 4-hop 이상은 성능 급락 + 노이즈 증가 — 실용적 이점 없음
 ```
 
 ---
